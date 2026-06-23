@@ -1,0 +1,30 @@
+name: Build and deploy (dev)
+on:
+
+  pull_request:
+
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy-dev:
+    environment: dev
+    runs-on:
+      group: arc-large-amd64-runner
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Build & Deploy dev
+        uses: worldcoin/gh-actions/build-and-deploy@main
+        with:
+          aws_account_id: 012345678901
+          aws_region: us-east-1
+          eks_cluster_name: test-dev-cluster
+          environment: dev
+          aws_iam_role: oidc/github-deploy-go-template
+
+          ecr_repo: go-template-dev
+
