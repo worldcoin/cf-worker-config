@@ -1,0 +1,11 @@
+{
+  "account_id": "account-123",
+  "workers": {
+    "tfh-website-dev": {
+      "worker_name": "tfh-website-dev",
+      "build_vars": {
+        "NODE_VERSION": "22",
+      }
+    }
+  }
+}
