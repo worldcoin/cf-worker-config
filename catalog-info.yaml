@@ -2,9 +2,9 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   annotations:
-    github.com/project-slug: worldcoin/go-template
-  tags: ['code-lang:Go']
-  description: Golang template repository
+    github.com/project-slug: worldcoin/cf-worker-config
+  tags: ['code-lang:go']
+  description: Go CLI for managing Cloudflare Workers Builds configuration as code
   links:
     - title: Linear
       url: PLACEHOLDER-ADD-LINEAR-URL
@@ -12,7 +12,7 @@ metadata:
       url: PLACEHOLDER-ADD-DOCUMENTATION-URL
     - title: Slack
       url: PLACEHOLDER-ADD-SLACK-URL
-  name: go-template
+  name: cf-worker-config
 spec:
   lifecycle: production
   owner: team-infrastructure
