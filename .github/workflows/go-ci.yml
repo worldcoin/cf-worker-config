@@ -9,4 +9,4 @@ jobs:
       group: arc-large-arm64-runner
     steps:
     - name: Go test
-      uses: worldcoin/gh-actions/go-test@main
+      uses: worldcoin/gh-actions/go-test@d85deb4492c789eb71d825206f2dcb7ac017a024
