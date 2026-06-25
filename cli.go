@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
 )
 
 const (
@@ -39,7 +43,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
 
-	fs, configPath, workerKey, failOnDrift := newCommandFlagSet(cmd, stderr)
+	fs, flags := newCommandFlagSet(cmd, stderr)
 	if containsHelpArg(args[1:]) {
 		fs.SetOutput(stdout)
 		fs.Usage()
@@ -52,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		return err
 	}
 
-	if *workerKey == "" {
+	if *flags.WorkerKey == "" {
 		fs.Usage()
 		return fmt.Errorf("--worker is required")
 	}
@@ -62,7 +66,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		return fmt.Errorf("%s environment variable is required", cloudflareAPIEnvVar)
 	}
 
-	cfg, err := Load(*configPath)
+	cfg, err := Load(*flags.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -73,7 +77,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 
 	switch cmd {
 	case "plan":
-		desired, err := cfg.GetWorker(*workerKey)
+		desired, err := cfg.GetWorker(*flags.WorkerKey)
 		if err != nil {
 			return err
 		}
@@ -82,13 +86,13 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 			return err
 		}
 		plan.Print()
-		if *failOnDrift && plan.HasChanges() {
+		if *flags.FailOnDrift && plan.HasChanges() {
 			return fmt.Errorf("drift detected: %d change(s)", len(plan.Actions))
 		}
 		return nil
 
 	case "apply":
-		desired, err := cfg.GetWorker(*workerKey)
+		desired, err := cfg.GetWorker(*flags.WorkerKey)
 		if err != nil {
 			return err
 		}
@@ -98,24 +102,28 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		}
 		plan.Print()
 		fmt.Println("\nApplying...")
-		return rec.Apply(ctx, desired, plan)
+		return rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{
+			TriggerBuild:    *flags.TriggerBuild,
+			BuildBranch:     resolveBuildBranch(desired, *flags.BuildBranch, getenv),
+			BuildCommitHash: resolveBuildCommitHash(*flags.BuildCommit, getenv),
+		})
 
 	case "status":
-		desired, err := cfg.GetWorker(*workerKey)
+		desired, err := cfg.GetWorker(*flags.WorkerKey)
 		if err != nil {
 			return err
 		}
 		return rec.Status(ctx, desired.WorkerName)
 
 	case "sync-build-vars":
-		desired, err := cfg.GetWorker(*workerKey)
+		desired, err := cfg.GetWorker(*flags.WorkerKey)
 		if err != nil {
 			return err
 		}
 		return rec.SyncBuildVars(ctx, desired)
 
 	case "sync-runtime-secrets":
-		desired, err := cfg.GetWorker(*workerKey)
+		desired, err := cfg.GetWorker(*flags.WorkerKey)
 		if err != nil {
 			return err
 		}
@@ -125,19 +133,41 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 	return fmt.Errorf("unhandled command: %s", cmd)
 }
 
-func newCommandFlagSet(cmd string, output io.Writer) (*flag.FlagSet, *string, *string, *bool) {
+type commandFlags struct {
+	ConfigPath   *string
+	WorkerKey    *string
+	FailOnDrift  *bool
+	TriggerBuild *bool
+	BuildBranch  *string
+	BuildCommit  *string
+}
+
+func newCommandFlagSet(cmd string, output io.Writer) (*flag.FlagSet, commandFlags) {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(output)
-	configPath := fs.String("config", defaultConfigPath, "path to config file")
-	workerKey := fs.String("worker", "", "worker key from config")
-	failOnDrift := fs.Bool("fail-on-drift", false, "exit 1 if plan has changes (for CI drift checks)")
+	flags := commandFlags{
+		ConfigPath:  fs.String("config", defaultConfigPath, "path to config file"),
+		WorkerKey:   fs.String("worker", "", "worker key from config"),
+		FailOnDrift: fs.Bool("fail-on-drift", false, "exit 1 if plan has changes (for CI drift checks)"),
+	}
+	if cmd == "apply" {
+		flags.TriggerBuild = fs.Bool("trigger-build", true, "queue a Workers Build after a successful apply")
+		flags.BuildBranch = fs.String("build-branch", "", "branch to build after apply (default: GitHub Actions/git branch, then production_branch)")
+		flags.BuildCommit = fs.String("build-commit", "", "commit hash to build after apply (default: GitHub Actions/git SHA when available)")
+	} else {
+		disabled := false
+		empty := ""
+		flags.TriggerBuild = &disabled
+		flags.BuildBranch = &empty
+		flags.BuildCommit = &empty
+	}
 	fs.Usage = func() {
 		printCommandUsage(fs.Output(), cmd)
 		writeUsage(fs.Output(), "\nFlags for %q:\n", cmd)
 		fs.PrintDefaults()
 		printEnvironment(fs.Output())
 	}
-	return fs, configPath, workerKey, failOnDrift
+	return fs, flags
 }
 
 func printHelp(args []string, stdout, stderr io.Writer) error {
@@ -155,7 +185,7 @@ func printHelp(args []string, stdout, stderr io.Writer) error {
 			printGlobalUsage(stderr)
 			return fmt.Errorf("unknown command: %s", cmd)
 		}
-		fs, _, _, _ := newCommandFlagSet(cmd, stdout)
+		fs, _ := newCommandFlagSet(cmd, stdout)
 		fs.Usage()
 		return nil
 	default:
@@ -218,6 +248,100 @@ Commands:
 
 func printEnvironment(w io.Writer) {
 	writeUsage(w, "\nEnvironment:\n  %s  Cloudflare API token (user-scoped, Workers Builds Configuration: Edit + Workers Scripts: Edit)\n", cloudflareAPIEnvVar)
+}
+
+func resolveBuildBranch(desired *Worker, override string, getenv func(string) string) string {
+	if branch := strings.TrimSpace(override); branch != "" {
+		return branch
+	}
+	if branch := gitCurrentBranch(); branch != "" && branch != "HEAD" {
+		return branch
+	}
+	for _, key := range []string{"GITHUB_HEAD_REF", "GITHUB_REF_NAME"} {
+		if branch := strings.TrimSpace(getenv(key)); branch != "" {
+			return branch
+		}
+	}
+	return desired.ProductionBranch
+}
+
+func resolveBuildCommitHash(override string, getenv func(string) string) string {
+	if commitHash := strings.TrimSpace(override); commitHash != "" {
+		return commitHash
+	}
+	if commitHash := gitCurrentCommitHash(); commitHash != "" {
+		return commitHash
+	}
+	if commitHash := githubEventCommitHash(getenv("GITHUB_EVENT_PATH")); commitHash != "" {
+		return commitHash
+	}
+	if commitHash := strings.TrimSpace(getenv("GITHUB_SHA")); commitHash != "" {
+		return commitHash
+	}
+	return ""
+}
+
+func githubEventCommitHash(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	data, err := readFileFromRoot(path)
+	if err != nil {
+		return ""
+	}
+	var event struct {
+		After       string `json:"after"`
+		PullRequest *struct {
+			Head struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
+		} `json:"pull_request"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		return ""
+	}
+	if event.PullRequest != nil && strings.TrimSpace(event.PullRequest.Head.SHA) != "" {
+		return strings.TrimSpace(event.PullRequest.Head.SHA)
+	}
+	return strings.TrimSpace(event.After)
+}
+
+func readFileFromRoot(path string) ([]byte, error) {
+	cleanPath := filepath.Clean(path)
+	if filepath.IsAbs(cleanPath) {
+		cleanPath = strings.TrimPrefix(cleanPath, string(filepath.Separator))
+	}
+	root, err := os.OpenRoot(string(filepath.Separator))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = root.Close()
+	}()
+	file, err := root.Open(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	return io.ReadAll(file)
+}
+
+func gitCurrentBranch() string {
+	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func gitCurrentCommitHash() string {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func writeUsage(w io.Writer, format string, args ...any) {

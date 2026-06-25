@@ -61,6 +61,7 @@ type APIClient interface {
 	ListTriggers(context.Context, string) ([]Trigger, error)
 	CreateTrigger(context.Context, CreateTriggerParams) (*Trigger, error)
 	UpdateTrigger(context.Context, string, UpdateTriggerParams) error
+	TriggerBuild(context.Context, string, TriggerBuildParams) (*Build, error)
 	ListBuildEnvVars(context.Context, string) (map[string]BuildEnvVar, error)
 	SetBuildEnvVars(context.Context, string, map[string]BuildEnvVar) error
 	DeleteBuildEnvVar(context.Context, string, string) error
@@ -74,6 +75,13 @@ type APIClient interface {
 // Reconciler compares desired and current state.
 type Reconciler struct {
 	client APIClient
+}
+
+// ApplyOptions controls optional side effects after reconciliation.
+type ApplyOptions struct {
+	TriggerBuild    bool
+	BuildBranch     string
+	BuildCommitHash string
 }
 
 // New creates a new Reconciler.
@@ -204,8 +212,8 @@ func (r *Reconciler) planRepoConnectionIfNeeded(plan *Plan, desired *Worker) {
 	})
 }
 
-// Apply executes a plan against the CF API.
-func (r *Reconciler) Apply(ctx context.Context, desired *Worker, plan *Plan) error {
+// ApplyWithOptions executes a plan against the CF API.
+func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan *Plan, opts ApplyOptions) error {
 	if !plan.HasChanges() {
 		fmt.Println("No trigger drift detected. Syncing declared env/secrets when values are available.")
 	}
@@ -263,7 +271,67 @@ func (r *Reconciler) Apply(ctx context.Context, desired *Worker, plan *Plan) err
 	if err := r.syncRuntimeSecrets(ctx, desired, false); err != nil {
 		return err
 	}
+	if opts.TriggerBuild {
+		if err := r.triggerBuild(ctx, desired, plan.WorkerTag, opts); err != nil {
+			return err
+		}
+	}
 
+	return nil
+}
+
+func (r *Reconciler) triggerBuild(ctx context.Context, desired *Worker, workerTag string, opts ApplyOptions) error {
+	branch := strings.TrimSpace(opts.BuildBranch)
+	if branch == "" {
+		branch = desired.ProductionBranch
+	}
+	commitHash := strings.TrimSpace(opts.BuildCommitHash)
+	if branch == "" && commitHash == "" {
+		return fmt.Errorf("build branch or commit hash is required to trigger a Workers Build")
+	}
+
+	kind := "production"
+	if branch != "" && branch != desired.ProductionBranch {
+		if !desired.Preview.Enabled {
+			fmt.Printf("Skipping Workers Build trigger for branch %q: preview builds are disabled for worker %s.\n", branch, desired.WorkerName)
+			return nil
+		}
+		kind = "preview"
+	}
+
+	triggers, err := r.client.ListTriggers(ctx, workerTag)
+	if err != nil {
+		return fmt.Errorf("listing triggers for build trigger: %w", err)
+	}
+	trigger, err := findTrigger(triggers, desired.ProductionBranch, kind)
+	if err != nil {
+		return err
+	}
+	if trigger == nil {
+		return fmt.Errorf("no %s trigger found for build", kind)
+	}
+
+	fmt.Printf("Triggering Workers Build on %s trigger %s", kind, trigger.TriggerUUID)
+	if branch != "" {
+		fmt.Printf(" for branch %q", branch)
+	}
+	if commitHash != "" {
+		fmt.Printf(" at commit %s", commitHash)
+	}
+	fmt.Println("...")
+
+	build, err := r.client.TriggerBuild(ctx, trigger.TriggerUUID, TriggerBuildParams{
+		Branch:     branch,
+		CommitHash: commitHash,
+	})
+	if err != nil {
+		return fmt.Errorf("triggering Workers Build: %w", err)
+	}
+	if build != nil && build.BuildUUID != "" {
+		fmt.Printf("  ✓ Queued Workers Build %s\n", build.BuildUUID)
+		return nil
+	}
+	fmt.Println("  ✓ Queued Workers Build")
 	return nil
 }
 

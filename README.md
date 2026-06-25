@@ -10,6 +10,7 @@ Manages the gap between Terraform (infra) and wrangler.jsonc (runtime):
 - **Build triggers** — production branch, build/deploy commands, preview branches
 - **Build variables and secrets** — env vars available during `next build`
 - **Runtime secrets** — env vars available to the Worker at request time
+- **Post-apply builds** — queues a Workers Build after reconciliation
 - **Drift detection** — `plan --fail-on-drift` for scheduled CI checks
 
 ## Config
@@ -91,6 +92,12 @@ cf-worker-config plan --worker tfh-website-dev
 # Apply changes
 cf-worker-config apply --worker tfh-website-dev
 
+# Apply changes without queueing a Workers Build
+cf-worker-config apply --worker tfh-website-dev --trigger-build=false
+
+# Apply and explicitly choose the build ref
+cf-worker-config apply --worker tfh-website-dev --build-branch feature/foo --build-commit abc123
+
 # Show current CF state
 cf-worker-config status --worker tfh-website-dev
 
@@ -108,6 +115,13 @@ cf-worker-config plan --worker tfh-website-dev --fail-on-drift
 secrets when their values are present in the environment. Existing secrets are
 left unchanged when no env value is present; missing secrets still require env
 values and fail fast.
+
+`apply` queues a Workers Build by default after reconciliation. In GitHub
+Actions, the tool uses `GITHUB_HEAD_REF`/`GITHUB_REF_NAME` and the pull request
+head SHA from `GITHUB_EVENT_PATH` when available. Locally, it falls back to the
+current git branch and commit, then to `production_branch` for the branch. Pass
+`--trigger-build=false` to skip this, or use `--build-branch`/`--build-commit`
+to override the detected ref.
 
 `plan --fail-on-drift` is not a strict runtime-secret drift check yet. Runtime
 secret values are never compared, and the plan only flags declared runtime
