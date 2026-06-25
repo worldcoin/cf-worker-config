@@ -110,6 +110,106 @@ func TestApplySyncsPreviewBuildVarsAndRefreshesExistingSecretsWhenEnvPresent(t *
 	}
 }
 
+func TestApplyUpdatesExistingTriggersWhenProductionBranchChanges(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"test/migrate-tfh-website-from-vercel-to-cloudflare-workers"},
+		},
+		{
+			TriggerUUID:    "preview",
+			TriggerName:    "Deploy preview branches",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:preview",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"test/migrate-tfh-website-from-vercel-to-cloudflare-workers"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+		Preview: Preview{
+			Enabled: true,
+			Command: "npm run deploy:cf:preview",
+		},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.Apply(ctx, desired, plan); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	if len(client.triggers) != 2 {
+		t.Fatalf("trigger count = %d, want 2", len(client.triggers))
+	}
+	if got := client.triggers[0].BranchIncludes; !equalStringSets(got, []string{"main"}) {
+		t.Fatalf("prod BranchIncludes = %v, want [main]", got)
+	}
+	if got := client.triggers[0].BranchExcludes; len(got) != 0 {
+		t.Fatalf("prod BranchExcludes = %v, want []", got)
+	}
+	if got := client.triggers[1].BranchIncludes; !equalStringSets(got, []string{"*"}) {
+		t.Fatalf("preview BranchIncludes = %v, want [*]", got)
+	}
+	if got := client.triggers[1].BranchExcludes; !equalStringSets(got, []string{"main"}) {
+		t.Fatalf("preview BranchExcludes = %v, want [main]", got)
+	}
+}
+
+func TestPlanErrorsWhenProductionTriggerFallbackIsAmbiguous(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod-1",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"old-main"},
+		},
+		{
+			TriggerUUID:    "prod-2",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"release"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+	}
+
+	rec := New(client)
+	_, err := rec.Plan(ctx, desired)
+	if err == nil || !strings.Contains(err.Error(), "multiple production trigger candidates") {
+		t.Fatalf("Plan() error = %v, want ambiguous production trigger error", err)
+	}
+}
+
 func TestApplyCreatesPreviewTriggerWithProductionRepoConnection(t *testing.T) {
 	ctx := context.Background()
 

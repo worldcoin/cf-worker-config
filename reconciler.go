@@ -98,8 +98,14 @@ func (r *Reconciler) Plan(ctx context.Context, desired *Worker) (*Plan, error) {
 		return nil, fmt.Errorf("listing triggers: %w", err)
 	}
 
-	prodTrigger := findProductionTrigger(triggers, desired.ProductionBranch)
-	previewTrigger := findPreviewTrigger(triggers, desired.ProductionBranch)
+	prodTrigger, err := findProductionTrigger(triggers, desired.ProductionBranch)
+	if err != nil {
+		return nil, err
+	}
+	previewTrigger, err := findPreviewTrigger(triggers, desired.ProductionBranch)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := r.planProductionTrigger(ctx, plan, desired, prodTrigger); err != nil {
 		return nil, err
@@ -324,7 +330,11 @@ func (r *Reconciler) previewRepoConnectionUUID(ctx context.Context, desired *Wor
 	if err != nil {
 		return "", fmt.Errorf("listing triggers for preview repo connection: %w", err)
 	}
-	if prodTrigger := findProductionTrigger(triggers, desired.ProductionBranch); prodTrigger != nil && prodTrigger.RepoConnectionUUID != "" {
+	prodTrigger, err := findProductionTrigger(triggers, desired.ProductionBranch)
+	if err != nil {
+		return "", err
+	}
+	if prodTrigger != nil && prodTrigger.RepoConnectionUUID != "" {
 		return prodTrigger.RepoConnectionUUID, nil
 	}
 
@@ -336,7 +346,10 @@ func (r *Reconciler) updateTrigger(ctx context.Context, desired *Worker, workerT
 	if err != nil {
 		return err
 	}
-	trigger := findTrigger(triggers, desired.ProductionBranch, kind)
+	trigger, err := findTrigger(triggers, desired.ProductionBranch, kind)
+	if err != nil {
+		return err
+	}
 	if trigger == nil {
 		return fmt.Errorf("no %s trigger found", kind)
 	}
@@ -378,7 +391,10 @@ func (r *Reconciler) getTriggerUUID(ctx context.Context, desired *Worker, worker
 	if err != nil {
 		return "", err
 	}
-	trigger := findTrigger(triggers, desired.ProductionBranch, kind)
+	trigger, err := findTrigger(triggers, desired.ProductionBranch, kind)
+	if err != nil {
+		return "", err
+	}
 	if trigger == nil {
 		return "", fmt.Errorf("no %s trigger found", kind)
 	}
@@ -729,25 +745,74 @@ func (r *Reconciler) resolveBuildToken(ctx context.Context, desired *Worker) (st
 	return tokens[0].BuildTokenUUID, nil
 }
 
-func findProductionTrigger(triggers []Trigger, productionBranch string) *Trigger {
+func findProductionTrigger(triggers []Trigger, productionBranch string) (*Trigger, error) {
 	return findTrigger(triggers, productionBranch, "production")
 }
 
-func findPreviewTrigger(triggers []Trigger, productionBranch string) *Trigger {
+func findPreviewTrigger(triggers []Trigger, productionBranch string) (*Trigger, error) {
 	return findTrigger(triggers, productionBranch, "preview")
 }
 
-func findTrigger(triggers []Trigger, productionBranch, kind string) *Trigger {
+func findTrigger(triggers []Trigger, productionBranch, kind string) (*Trigger, error) {
 	for i := range triggers {
 		trigger := &triggers[i]
-		if kind == "production" && equalStringSets(trigger.BranchIncludes, []string{productionBranch}) {
-			return trigger
+		if kind == "production" && equalStringSets(trigger.BranchIncludes, []string{productionBranch}) && len(trigger.BranchExcludes) == 0 {
+			return trigger, nil
 		}
-		if kind == "preview" && slices.Contains(trigger.BranchExcludes, productionBranch) {
-			return trigger
+		if kind == "preview" && equalStringSets(trigger.BranchIncludes, []string{"*"}) && slices.Contains(trigger.BranchExcludes, productionBranch) {
+			return trigger, nil
 		}
 	}
-	return nil
+
+	var candidates []*Trigger
+	for i := range triggers {
+		trigger := &triggers[i]
+		switch kind {
+		case "production":
+			if isProductionTriggerCandidate(*trigger) {
+				candidates = append(candidates, trigger)
+			}
+		case "preview":
+			if isPreviewTriggerCandidate(*trigger) {
+				candidates = append(candidates, trigger)
+			}
+		default:
+			return nil, fmt.Errorf("unknown trigger kind %q", kind)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if len(candidates) > 1 {
+		return nil, fmt.Errorf("multiple %s trigger candidates found; refusing to choose one", kind)
+	}
+	return candidates[0], nil
+}
+
+func isProductionTriggerCandidate(trigger Trigger) bool {
+	if isProductionTriggerName(trigger.TriggerName) {
+		return true
+	}
+	if isPreviewTriggerCandidate(trigger) {
+		return false
+	}
+	return len(trigger.BranchIncludes) > 0 && !equalStringSets(trigger.BranchIncludes, []string{"*"}) && len(trigger.BranchExcludes) == 0
+}
+
+func isPreviewTriggerCandidate(trigger Trigger) bool {
+	if strings.EqualFold(strings.TrimSpace(trigger.TriggerName), "Deploy preview branches") {
+		return true
+	}
+	return equalStringSets(trigger.BranchIncludes, []string{"*"}) && len(trigger.BranchExcludes) > 0
+}
+
+func isProductionTriggerName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "deploy production", "deploy default branch":
+		return true
+	default:
+		return false
+	}
 }
 
 func productionBuildVars(desired *Worker) map[string]string {
