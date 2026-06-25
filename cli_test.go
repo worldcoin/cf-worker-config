@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -101,6 +104,85 @@ func TestRunUsageAndValidation(t *testing.T) {
 			assertContainsNone(t, "stdout", stdout.String(), tt.wantStdoutAbsent)
 			assertContainsNone(t, "stderr", stderr.String(), tt.wantStderrAbsent)
 		})
+	}
+}
+
+func TestResolveBuildRefFromGitHubPullRequestEvent(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	eventPath := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(eventPath, []byte(`{
+		"pull_request": {
+			"head": {
+				"sha": "head-sha"
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("writing event: %v", err)
+	}
+
+	env := map[string]string{
+		"GITHUB_HEAD_REF":   "feature-branch",
+		"GITHUB_REF_NAME":   "ignored-ref",
+		"GITHUB_EVENT_PATH": eventPath,
+		"GITHUB_SHA":        "merge-sha",
+	}
+	getenv := func(key string) string {
+		return env[key]
+	}
+	desired := &Worker{ProductionBranch: "main"}
+
+	if got := resolveBuildBranch(desired, "", getenv); got != "feature-branch" {
+		t.Fatalf("resolveBuildBranch() = %q, want feature-branch", got)
+	}
+	if got := resolveBuildCommitHash("", getenv); got != "head-sha" {
+		t.Fatalf("resolveBuildCommitHash() = %q, want head-sha", got)
+	}
+}
+
+func TestResolveBuildCommitPrefersCheckoutHead(t *testing.T) {
+	t.Chdir(t.TempDir())
+	runGit(t, "init")
+	runGit(t, "config", "user.email", "test@example.com")
+	runGit(t, "config", "user.name", "Test User")
+	if err := os.WriteFile("README.md", []byte("test\n"), 0o600); err != nil {
+		t.Fatalf("writing README: %v", err)
+	}
+	runGit(t, "add", "README.md")
+	runGit(t, "commit", "-m", "initial")
+	head := gitCurrentCommitHash()
+	if head == "" {
+		t.Fatalf("git HEAD is empty")
+	}
+
+	eventPath := filepath.Join(t.TempDir(), "event.json")
+	if err := os.WriteFile(eventPath, []byte(`{
+		"pull_request": {
+			"head": {
+				"sha": "event-sha"
+			}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("writing event: %v", err)
+	}
+	env := map[string]string{
+		"GITHUB_EVENT_PATH": eventPath,
+		"GITHUB_SHA":        "github-sha",
+	}
+	getenv := func(key string) string {
+		return env[key]
+	}
+
+	if got := resolveBuildCommitHash("", getenv); got != head {
+		t.Fatalf("resolveBuildCommitHash() = %q, want checkout HEAD %q", got, head)
+	}
+}
+
+func runGit(t *testing.T, args ...string) {
+	t.Helper()
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
 

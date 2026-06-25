@@ -178,6 +178,43 @@ func TestListRuntimeSecretsReturnsOtherCloudflareErrors(t *testing.T) {
 	}
 }
 
+func TestTriggerBuildPostsBranchAndCommit(t *testing.T) {
+	client := NewClient("token", "account-id")
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", req.Method)
+			}
+			wantPath := "/client/v4/accounts/account-id/builds/triggers/trigger-id/builds"
+			if req.URL.Path != wantPath {
+				t.Fatalf("path = %q, want %q", req.URL.Path, wantPath)
+			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("reading body: %v", err)
+			}
+			if got := string(body); got != `{"branch":"feature","commit_hash":"abc123"}` {
+				t.Fatalf("body = %q, want branch and commit", got)
+			}
+			return jsonResponse(http.StatusOK, `{
+				"success": true,
+				"result": {"build_uuid": "build-1"}
+			}`), nil
+		}),
+	}
+
+	build, err := client.TriggerBuild(context.Background(), "trigger-id", TriggerBuildParams{
+		Branch:     "feature",
+		CommitHash: "abc123",
+	})
+	if err != nil {
+		t.Fatalf("TriggerBuild() error = %v, want nil", err)
+	}
+	if build.BuildUUID != "build-1" {
+		t.Fatalf("BuildUUID = %q, want build-1", build.BuildUUID)
+	}
+}
+
 func TestDoJSONReturnsErrorForUnsuccessfulEnvelopeWithoutErrors(t *testing.T) {
 	client := NewClient("token", "account-id")
 	client.http = &http.Client{

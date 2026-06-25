@@ -33,7 +33,7 @@ func TestApplyCreatesTriggerAndSyncsBuildVarsInSameRun(t *testing.T) {
 		t.Fatalf("expected trigger creation in plan")
 	}
 
-	if err := rec.Apply(ctx, desired, plan); err != nil {
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestApplySyncsPreviewBuildVarsAndRefreshesExistingSecretsWhenEnvPresent(t *
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
-	if err := rec.Apply(ctx, desired, plan); err != nil {
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestApplyUpdatesExistingTriggersWhenProductionBranchChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
-	if err := rec.Apply(ctx, desired, plan); err != nil {
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 
@@ -170,6 +170,214 @@ func TestApplyUpdatesExistingTriggersWhenProductionBranchChanges(t *testing.T) {
 	}
 	if got := client.triggers[1].BranchExcludes; !equalStringSets(got, []string{"main"}) {
 		t.Fatalf("preview BranchExcludes = %v, want [main]", got)
+	}
+}
+
+func TestApplyWithOptionsTriggersBuildForProductionBranch(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"main"},
+		},
+		{
+			TriggerUUID:    "preview",
+			TriggerName:    "Deploy preview branches",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:preview",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"main"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+		Preview: Preview{
+			Enabled: true,
+			Command: "npm run deploy:cf:preview",
+		},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{
+		TriggerBuild:    true,
+		BuildBranch:     "main",
+		BuildCommitHash: "abc123",
+	}); err != nil {
+		t.Fatalf("ApplyWithOptions() error = %v", err)
+	}
+
+	if len(client.triggeredBuilds) != 1 {
+		t.Fatalf("triggered builds = %d, want 1", len(client.triggeredBuilds))
+	}
+	got := client.triggeredBuilds[0]
+	if got.TriggerUUID != "prod" {
+		t.Fatalf("trigger uuid = %q, want prod", got.TriggerUUID)
+	}
+	if got.Params.Branch != "main" {
+		t.Fatalf("trigger branch = %q, want main", got.Params.Branch)
+	}
+	if got.Params.CommitHash != "abc123" {
+		t.Fatalf("trigger commit = %q, want abc123", got.Params.CommitHash)
+	}
+}
+
+func TestApplyWithOptionsTriggersBuildForPreviewBranch(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"main"},
+		},
+		{
+			TriggerUUID:    "preview",
+			TriggerName:    "Deploy preview branches",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:preview",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"main"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+		Preview: Preview{
+			Enabled: true,
+			Command: "npm run deploy:cf:preview",
+		},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{
+		TriggerBuild:    true,
+		BuildBranch:     "feature-branch",
+		BuildCommitHash: "def456",
+	}); err != nil {
+		t.Fatalf("ApplyWithOptions() error = %v", err)
+	}
+
+	if len(client.triggeredBuilds) != 1 {
+		t.Fatalf("triggered builds = %d, want 1", len(client.triggeredBuilds))
+	}
+	got := client.triggeredBuilds[0]
+	if got.TriggerUUID != "preview" {
+		t.Fatalf("trigger uuid = %q, want preview", got.TriggerUUID)
+	}
+	if got.Params.Branch != "feature-branch" {
+		t.Fatalf("trigger branch = %q, want feature-branch", got.Params.Branch)
+	}
+	if got.Params.CommitHash != "def456" {
+		t.Fatalf("trigger commit = %q, want def456", got.Params.CommitHash)
+	}
+}
+
+func TestApplyWithOptionsCanSkipTriggerBuild(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"main"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{TriggerBuild: false}); err != nil {
+		t.Fatalf("ApplyWithOptions() error = %v", err)
+	}
+	if len(client.triggeredBuilds) != 0 {
+		t.Fatalf("triggered builds = %d, want 0", len(client.triggeredBuilds))
+	}
+}
+
+func TestApplyWithOptionsSkipsNonProductionBranchWhenPreviewDisabled(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:prod",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"main"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-prod",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:prod",
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{
+		TriggerBuild:    true,
+		BuildBranch:     "feature-branch",
+		BuildCommitHash: "abc123",
+	}); err != nil {
+		t.Fatalf("ApplyWithOptions() error = %v", err)
+	}
+	if len(client.triggeredBuilds) != 0 {
+		t.Fatalf("triggered builds = %d, want 0", len(client.triggeredBuilds))
 	}
 }
 
@@ -252,7 +460,7 @@ func TestApplyCreatesPreviewTriggerWithProductionRepoConnection(t *testing.T) {
 		}
 	}
 
-	if err := rec.Apply(ctx, desired, plan); err != nil {
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
 	if client.createRepoConnectionCalls != 0 {
@@ -293,7 +501,7 @@ func TestApplyRequiresExplicitBuildTokenWhenMultipleTokensExist(t *testing.T) {
 		t.Fatalf("Plan() error = %v", err)
 	}
 
-	err = rec.Apply(ctx, desired, plan)
+	err = rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{})
 	if err == nil || !strings.Contains(err.Error(), "multiple build tokens") {
 		t.Fatalf("Apply() error = %v, want multiple build tokens error", err)
 	}
@@ -422,8 +630,14 @@ type fakeClient struct {
 	buildVars                 map[string]map[string]BuildEnvVar
 	buildTokens               []BuildToken
 	runtimeSecrets            []string
+	triggeredBuilds           []triggeredBuild
 	createRepoConnectionCalls int
 	lookupGitHubRepoCalls     int
+}
+
+type triggeredBuild struct {
+	TriggerUUID string
+	Params      TriggerBuildParams
 }
 
 func newFakeClient() *fakeClient {
@@ -484,6 +698,14 @@ func (f *fakeClient) UpdateTrigger(_ context.Context, triggerUUID string, params
 		return nil
 	}
 	return nil
+}
+
+func (f *fakeClient) TriggerBuild(_ context.Context, triggerUUID string, params TriggerBuildParams) (*Build, error) {
+	f.triggeredBuilds = append(f.triggeredBuilds, triggeredBuild{
+		TriggerUUID: triggerUUID,
+		Params:      params,
+	})
+	return &Build{BuildUUID: "build-1"}, nil
 }
 
 func (f *fakeClient) ListBuildEnvVars(_ context.Context, triggerUUID string) (map[string]BuildEnvVar, error) {

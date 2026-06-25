@@ -196,6 +196,29 @@ func (c *Client) UpdateTrigger(ctx context.Context, triggerUUID string, params U
 	return c.doJSON(ctx, "PATCH", apiURL, params, nil)
 }
 
+// TriggerBuildParams contains the parameters for manually starting a Workers Build.
+type TriggerBuildParams struct {
+	Branch     string `json:"branch,omitempty"`
+	CommitHash string `json:"commit_hash,omitempty"`
+}
+
+// Build represents a Workers Builds build.
+type Build struct {
+	BuildUUID string `json:"build_uuid"`
+}
+
+// TriggerBuild manually queues a build for an existing trigger.
+func (c *Client) TriggerBuild(ctx context.Context, triggerUUID string, params TriggerBuildParams) (*Build, error) {
+	apiURL := c.cfURL("builds", "triggers", triggerUUID, "builds")
+	var result struct {
+		Result Build `json:"result"`
+	}
+	if err := c.doJSON(ctx, "POST", apiURL, params, &result); err != nil {
+		return nil, err
+	}
+	return &result.Result, nil
+}
+
 // --- Build environment variables ---
 
 // BuildEnvVar represents a build-time environment variable.
