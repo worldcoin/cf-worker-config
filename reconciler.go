@@ -70,6 +70,7 @@ type APIClient interface {
 	LookupGitHubRepo(context.Context, string, string) (*GitHubRepoInfo, error)
 	ListRuntimeSecrets(context.Context, string) ([]string, error)
 	SetRuntimeSecret(context.Context, string, string, string) error
+	DeleteRuntimeSecret(context.Context, string, string) error
 }
 
 // Reconciler compares desired and current state.
@@ -136,7 +137,7 @@ func (r *Reconciler) Plan(ctx context.Context, desired *Worker) (*Plan, error) {
 		if _, ok := currentSecretSet[key]; !ok {
 			plan.Actions = append(plan.Actions, Action{
 				Type: "set", Resource: "runtime_secret", Name: key,
-				Detail: "missing (will read from env)",
+				Detail: "missing (run sync-runtime-secrets)",
 			})
 		}
 	}
@@ -169,7 +170,7 @@ func (r *Reconciler) planPreviewTrigger(ctx context.Context, plan *Plan, desired
 			Name:     "preview",
 			Detail:   fmt.Sprintf("command=%q", desired.Preview.Command),
 		})
-		if prodTrigger != nil && prodTrigger.RepoConnectionUUID == "" {
+		if prodTrigger != nil && prodTrigger.repoConnectionUUID() == "" {
 			r.planRepoConnectionIfNeeded(plan, desired)
 		}
 		return nil
@@ -215,12 +216,16 @@ func (r *Reconciler) planRepoConnectionIfNeeded(plan *Plan, desired *Worker) {
 // ApplyWithOptions executes a plan against the CF API.
 func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan *Plan, opts ApplyOptions) error {
 	if !plan.HasChanges() {
-		fmt.Println("No trigger drift detected. Syncing declared env/secrets when values are available.")
+		fmt.Println("No trigger drift detected. Syncing declared build env/secrets when values are available.")
 	}
 
 	for _, action := range plan.Actions {
-		fmt.Printf("Applying: %s\n", action)
+		if action.Resource == "runtime_secret" {
+			fmt.Printf("Skipping: %s (runtime secrets are only synced by sync-runtime-secrets)\n", action)
+			continue
+		}
 
+		fmt.Printf("Applying: %s\n", action)
 		switch {
 		case action.Resource == "trigger" && action.Type == "create" && action.Name == "production":
 			if err := r.createProductionTrigger(ctx, desired, plan.WorkerTag); err != nil {
@@ -251,8 +256,8 @@ func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan
 				return err
 			}
 
-		case action.Resource == "build_var" || action.Resource == "build_secret" || action.Resource == "runtime_secret" || action.Resource == "repo_connection":
-			// Env/secrets and repo connection are reconciled in batch after trigger changes.
+		case action.Resource == "build_var" || action.Resource == "build_secret" || action.Resource == "repo_connection":
+			// Build env and repo connection are reconciled in batch after trigger changes.
 			continue
 
 		case action.Resource == "trigger" && action.Type == "delete" && action.Name == "preview":
@@ -266,9 +271,6 @@ func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan
 	}
 
 	if err := r.syncBuildEnvForDesiredTriggers(ctx, desired, plan.WorkerTag, false); err != nil {
-		return err
-	}
-	if err := r.syncRuntimeSecrets(ctx, desired, false); err != nil {
 		return err
 	}
 	if opts.TriggerBuild {
@@ -402,8 +404,8 @@ func (r *Reconciler) previewRepoConnectionUUID(ctx context.Context, desired *Wor
 	if err != nil {
 		return "", err
 	}
-	if prodTrigger != nil && prodTrigger.RepoConnectionUUID != "" {
-		return prodTrigger.RepoConnectionUUID, nil
+	if prodTrigger != nil && prodTrigger.repoConnectionUUID() != "" {
+		return prodTrigger.repoConnectionUUID(), nil
 	}
 
 	return r.ensureRepoConnection(ctx, desired)
@@ -536,6 +538,40 @@ func (r *Reconciler) printRuntimeSecretsStatus(ctx context.Context, workerName s
 	return nil
 }
 
+// RepoConnectionUUID returns the repo connection UUID used by the worker triggers.
+func (r *Reconciler) RepoConnectionUUID(ctx context.Context, desired *Worker) (string, error) {
+	tag, err := r.client.GetWorkerTag(ctx, desired.WorkerName)
+	if err != nil {
+		return "", fmt.Errorf("looking up worker: %w", err)
+	}
+	triggers, err := r.client.ListTriggers(ctx, tag)
+	if err != nil {
+		return "", fmt.Errorf("listing triggers: %w", err)
+	}
+
+	prodTrigger, err := findProductionTrigger(triggers, desired.ProductionBranch)
+	if err != nil {
+		return "", err
+	}
+	if prodTrigger != nil && prodTrigger.repoConnectionUUID() != "" {
+		return prodTrigger.repoConnectionUUID(), nil
+	}
+
+	previewTrigger, err := findPreviewTrigger(triggers, desired.ProductionBranch)
+	if err != nil {
+		return "", err
+	}
+	if previewTrigger != nil && previewTrigger.repoConnectionUUID() != "" {
+		return previewTrigger.repoConnectionUUID(), nil
+	}
+
+	if desired.RepoConnectionUUID != "" {
+		return desired.RepoConnectionUUID, nil
+	}
+
+	return "", fmt.Errorf("repo_connection_uuid not found on existing triggers")
+}
+
 func sortedBuildEnvVarKeys(vars map[string]BuildEnvVar) []string {
 	keys := make([]string, 0, len(vars))
 	for k := range vars {
@@ -555,9 +591,10 @@ func (r *Reconciler) SyncBuildVars(ctx context.Context, desired *Worker) error {
 	return r.syncBuildEnvForDesiredTriggers(ctx, desired, tag, true)
 }
 
-// SyncRuntimeSecrets syncs all runtime secrets from env to worker.
-func (r *Reconciler) SyncRuntimeSecrets(ctx context.Context, desired *Worker) error {
-	return r.syncRuntimeSecrets(ctx, desired, true)
+type runtimeSecretSyncOptions struct {
+	requireAllSecrets bool
+	refreshExisting   bool
+	prune             bool
 }
 
 func (r *Reconciler) syncBuildEnvForDesiredTriggers(ctx context.Context, desired *Worker, workerTag string, requireAllSecrets bool) error {
@@ -613,7 +650,7 @@ func (r *Reconciler) syncBuildEnvForTrigger(ctx context.Context, triggerName, tr
 	return nil
 }
 
-func (r *Reconciler) syncRuntimeSecrets(ctx context.Context, desired *Worker, requireAllSecrets bool) error {
+func (r *Reconciler) syncRuntimeSecrets(ctx context.Context, desired *Worker, opts runtimeSecretSyncOptions) error {
 	currentSecrets, err := r.client.ListRuntimeSecrets(ctx, desired.WorkerName)
 	if err != nil {
 		return fmt.Errorf("listing runtime secrets: %w", err)
@@ -622,12 +659,22 @@ func (r *Reconciler) syncRuntimeSecrets(ctx context.Context, desired *Worker, re
 	for _, s := range currentSecrets {
 		currentSecretSet[s] = struct{}{}
 	}
+	desiredSecretSet := make(map[string]struct{}, len(desired.RuntimeSecrets))
+	for _, key := range desired.RuntimeSecrets {
+		desiredSecretSet[key] = struct{}{}
+	}
 
 	fmt.Printf("Syncing runtime secrets to worker %s when values are available...\n", desired.WorkerName)
 	for _, key := range desired.RuntimeSecrets {
+		_, exists := currentSecretSet[key]
+		if exists && !opts.refreshExisting {
+			fmt.Printf("  - %s already exists; skipping refresh\n", key)
+			continue
+		}
+
 		value := os.Getenv(key)
 		if value == "" {
-			if _, ok := currentSecretSet[key]; ok && !requireAllSecrets {
+			if exists && !opts.requireAllSecrets {
 				continue
 			}
 			return fmt.Errorf("env var %s is empty — cannot set runtime secret", key)
@@ -636,6 +683,17 @@ func (r *Reconciler) syncRuntimeSecrets(ctx context.Context, desired *Worker, re
 			return fmt.Errorf("setting %s: %w", key, err)
 		}
 		fmt.Printf("  ✓ %s\n", key)
+	}
+	if opts.prune {
+		for _, key := range currentSecrets {
+			if _, desired := desiredSecretSet[key]; desired {
+				continue
+			}
+			if err := r.client.DeleteRuntimeSecret(ctx, desired.WorkerName, key); err != nil {
+				return fmt.Errorf("deleting %s: %w", key, err)
+			}
+			fmt.Printf("  - deleted %s\n", key)
+		}
 	}
 	fmt.Println("✓ Done")
 	return nil
@@ -718,7 +776,7 @@ func (r *Reconciler) diffTrigger(kind string, current *Trigger, desired *Worker)
 	if desired.BuildCachingEnabled != nil && (current.BuildCachingEnabled == nil || *current.BuildCachingEnabled != *desired.BuildCachingEnabled) {
 		diffs = append(diffs, "build_caching_enabled changed")
 	}
-	if desired.RepoConnectionUUID != "" && current.RepoConnectionUUID != "" && current.RepoConnectionUUID != desired.RepoConnectionUUID {
+	if desired.RepoConnectionUUID != "" && current.repoConnectionUUID() != "" && current.repoConnectionUUID() != desired.RepoConnectionUUID {
 		diffs = append(diffs, "repo_connection_uuid changed")
 	}
 	if desired.BuildTokenUUID != "" && current.BuildTokenUUID != "" && current.BuildTokenUUID != desired.BuildTokenUUID {
@@ -815,6 +873,13 @@ func (r *Reconciler) resolveBuildToken(ctx context.Context, desired *Worker) (st
 
 func findProductionTrigger(triggers []Trigger, productionBranch string) (*Trigger, error) {
 	return findTrigger(triggers, productionBranch, "production")
+}
+
+func (t Trigger) repoConnectionUUID() string {
+	if t.RepoConnectionUUID != "" {
+		return t.RepoConnectionUUID
+	}
+	return t.RepoConnection.RepoConnectionUUID
 }
 
 func findPreviewTrigger(triggers []Trigger, productionBranch string) (*Trigger, error) {

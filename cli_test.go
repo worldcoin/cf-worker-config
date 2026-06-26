@@ -41,6 +41,22 @@ func TestRunUsageAndValidation(t *testing.T) {
 			wantStdout: []string{"Usage:\n  cf-worker-config plan [flags]", `Flags for "plan":`, cloudflareAPIEnvVar},
 		},
 		{
+			name:       "repo connection help flag prints command usage",
+			args:       []string{"get-repo-connection", "--help"},
+			wantStdout: []string{"Usage:\n  cf-worker-config get-repo-connection [flags]", `Flags for "get-repo-connection":`, cloudflareAPIEnvVar},
+		},
+		{
+			name:       "runtime secrets help includes prune flag",
+			args:       []string{"sync-runtime-secrets", "--help"},
+			wantStdout: []string{"Usage:\n  cf-worker-config sync-runtime-secrets [flags]", "-prune"},
+		},
+		{
+			name:             "plan help does not include prune flag",
+			args:             []string{"plan", "--help"},
+			wantStdout:       []string{"Usage:\n  cf-worker-config plan [flags]"},
+			wantStdoutAbsent: []string{"-prune"},
+		},
+		{
 			name:            "unknown command does not require token",
 			args:            []string{"nope"},
 			wantErr:         "unknown command: nope",
@@ -59,6 +75,13 @@ func TestRunUsageAndValidation(t *testing.T) {
 			args:       []string{"plan", "--worker", "tfh-website-dev"},
 			wantErr:    cloudflareAPIEnvVar + " environment variable is required",
 			wantStderr: nil,
+		},
+		{
+			name:            "get repo connection requires account id without reading config",
+			args:            []string{"get-repo-connection", "--worker", "tfh-website-dev"},
+			env:             map[string]string{cloudflareAPIEnvVar: "token"},
+			wantErr:         cloudflareAccountIDEnvVar + " environment variable or --account-id is required",
+			wantErrExcludes: []string{"reading config"},
 		},
 		{
 			name:            "bad flag does not require token",

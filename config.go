@@ -10,14 +10,8 @@ import (
 
 // Config is the top-level configuration for cf-worker-config.
 type Config struct {
-	Schema    string            `json:"$schema,omitempty"`
-	AccountID string            `json:"account_id"`
-	Workers   map[string]Worker `json:"workers"`
-}
-
-// Worker describes the desired Workers Builds configuration for a single worker.
-type Worker struct {
-	WorkerName          string            `json:"worker_name"`
+	Schema              string            `json:"$schema,omitempty"`
+	AccountID           string            `json:"account_id"`
 	Repo                string            `json:"repo"`
 	RepoConnectionUUID  string            `json:"repo_connection_uuid"`
 	ProviderType        string            `json:"provider_type"`
@@ -25,6 +19,19 @@ type Worker struct {
 	ProviderAccountName string            `json:"provider_account_name"`
 	RepoID              string            `json:"repo_id"`
 	RepoName            string            `json:"repo_name"`
+	Workers             map[string]Worker `json:"workers"`
+}
+
+// Worker describes the desired Workers Builds configuration for a single worker.
+type Worker struct {
+	WorkerName          string            `json:"-"`
+	Repo                string            `json:"-"`
+	RepoConnectionUUID  string            `json:"-"`
+	ProviderType        string            `json:"-"`
+	ProviderAccountID   string            `json:"-"`
+	ProviderAccountName string            `json:"-"`
+	RepoID              string            `json:"-"`
+	RepoName            string            `json:"-"`
 	BuildTokenUUID      string            `json:"build_token_uuid"`
 	BuildTokenName      string            `json:"build_token_name"`
 	ProductionBranch    string            `json:"production_branch"`
@@ -87,17 +94,13 @@ func Load(configPath string) (*Config, error) {
 	if cfg.AccountID == "" {
 		return nil, fmt.Errorf("account_id is required")
 	}
+	if cfg.Repo == "" {
+		return nil, fmt.Errorf("repo is required")
+	}
 
 	for name, w := range cfg.Workers {
-		if w.WorkerName == "" {
-			return nil, fmt.Errorf("worker %q: worker_name is required", name)
-		}
-		if w.WorkerName != name {
-			return nil, fmt.Errorf("worker %q: worker_name %q must match the map key", name, w.WorkerName)
-		}
-		if w.Repo == "" {
-			return nil, fmt.Errorf("worker %q: repo is required", name)
-		}
+		w.WorkerName = name
+		applyRepoDefaults(&w, cfg)
 		if w.ProductionBranch == "" {
 			return nil, fmt.Errorf("worker %q: production_branch is required", name)
 		}
@@ -110,9 +113,34 @@ func Load(configPath string) (*Config, error) {
 		if w.Preview.Enabled && w.Preview.Command == "" {
 			return nil, fmt.Errorf("worker %q: preview.command is required when preview.enabled=true", name)
 		}
+		cfg.Workers[name] = w
 	}
 
 	return &cfg, nil
+}
+
+func applyRepoDefaults(w *Worker, cfg Config) {
+	if w.Repo == "" {
+		w.Repo = cfg.Repo
+	}
+	if w.RepoConnectionUUID == "" {
+		w.RepoConnectionUUID = cfg.RepoConnectionUUID
+	}
+	if w.ProviderType == "" {
+		w.ProviderType = cfg.ProviderType
+	}
+	if w.ProviderAccountID == "" {
+		w.ProviderAccountID = cfg.ProviderAccountID
+	}
+	if w.ProviderAccountName == "" {
+		w.ProviderAccountName = cfg.ProviderAccountName
+	}
+	if w.RepoID == "" {
+		w.RepoID = cfg.RepoID
+	}
+	if w.RepoName == "" {
+		w.RepoName = cfg.RepoName
+	}
 }
 
 // GetWorker returns the configuration for a specific worker, or an error if not found.

@@ -20,10 +20,10 @@ Create a `cf-worker-config.json` in your repo. This is strict JSON, not JSONC:
 ```json
 {
   "account_id": "ae97c44fcd31b9289a7455120d2698b2",
+  "repo": "worldcoin/tfh-website",
+  "repo_connection_uuid": "52ef781c-6fdd-4e2a-b868-c501ed11f0da",
   "workers": {
     "tfh-website-dev": {
-      "worker_name": "tfh-website-dev",
-      "repo": "worldcoin/tfh-website",
       "production_branch": "main",
       "root_directory": ".",
       "path_includes": ["*"],
@@ -64,9 +64,14 @@ Create a `cf-worker-config.json` in your repo. This is strict JSON, not JSONC:
 
 Secret **values** are read from environment variables at apply time, not from the config file.
 
-If `repo_connection_uuid` is not set, the tool creates/ensures a repo connection from
-the `repo` value. For private GitHub repositories, set `GITHUB_TOKEN` or provide
-`provider_account_id` and `repo_id` explicitly.
+`repo` and `repo_connection_uuid` are top-level because a config file normally
+lives in one application repository and the repo connection is shared by all
+Workers in that file. Worker-level repo connection fields are intentionally not
+part of the JSON config schema.
+
+If `repo_connection_uuid` is not set, the tool creates/ensures a repo connection
+from the `repo` value. For private GitHub repositories, set `GITHUB_TOKEN` or
+provide top-level `provider_account_id` and `repo_id` explicitly.
 
 If multiple Workers Builds tokens exist, set `build_token_uuid` or `build_token_name`.
 The tool will fail instead of choosing an arbitrary token.
@@ -107,14 +112,27 @@ cf-worker-config sync-build-vars --worker tfh-website-dev
 # Sync runtime secrets only
 cf-worker-config sync-runtime-secrets --worker tfh-website-dev
 
+# Sync runtime secrets and delete runtime secrets not listed in config
+cf-worker-config sync-runtime-secrets --worker tfh-website-dev --prune
+
+# Print the repo connection UUID currently used by a worker
+CLOUDFLARE_ACCOUNT_ID=ae97c44fcd31b9289a7455120d2698b2 \
+  cf-worker-config get-repo-connection --worker tfh-website-dev
+
 # Drift check in CI
 cf-worker-config plan --worker tfh-website-dev --fail-on-drift
 ```
 
-`apply` always syncs declared build vars and refreshes declared build/runtime
-secrets when their values are present in the environment. Existing secrets are
-left unchanged when no env value is present; missing secrets still require env
-values and fail fast.
+`apply` always syncs declared build vars and refreshes declared build secrets
+when their values are present in the environment. Runtime secrets are not
+created or refreshed during `apply`; use `sync-runtime-secrets` when
+intentionally creating or rotating runtime secrets. Pass `--prune` to
+`sync-runtime-secrets` to delete runtime secrets that exist in Cloudflare but
+are not listed in `runtime_secrets`.
+
+`get-repo-connection` does not read `cf-worker-config.json`. It reads the
+existing Workers Builds triggers directly from Cloudflare and requires
+`--account-id` or `CLOUDFLARE_ACCOUNT_ID`.
 
 `apply` queues a Workers Build by default after reconciliation. In GitHub
 Actions, the tool uses `GITHUB_HEAD_REF`/`GITHUB_REF_NAME` and the pull request
@@ -126,9 +144,8 @@ to override the detected ref.
 `plan --fail-on-drift` is not a strict runtime-secret drift check yet. Runtime
 secret values are never compared, and the plan only flags declared runtime
 secrets that are missing in Cloudflare. Extra runtime secrets that exist in
-Cloudflare but are not listed in config are not reported or deleted. Strict
-runtime-secret drift detection can be added later if this workflow becomes
-authoritative for runtime secret names.
+Cloudflare but are not listed in config are only deleted by
+`sync-runtime-secrets --prune`.
 
 `plan` compares typed desired config against typed Cloudflare API responses. That
 is intentionally more stable than a raw JSON diff because Cloudflare responses

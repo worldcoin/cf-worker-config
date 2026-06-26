@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -340,6 +341,102 @@ func TestApplyWithOptionsCanSkipTriggerBuild(t *testing.T) {
 	}
 }
 
+func TestApplySkipsRuntimeSecrets(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("MISSING_SECRET", "new")
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"main"},
+		},
+	}
+	client.runtimeSecrets = []string{"EXISTING_SECRET"}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+		RuntimeSecrets:   []string{"EXISTING_SECRET", "MISSING_SECRET"},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
+		t.Fatalf("ApplyWithOptions() error = %v", err)
+	}
+
+	if len(client.runtimeSecretSets) != 0 {
+		t.Fatalf("runtime secret sets = %v, want none", client.runtimeSecretSets)
+	}
+}
+
+func TestSyncRuntimeSecretsRefreshesExistingRuntimeSecrets(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("EXISTING_SECRET", "rotated")
+
+	client := newFakeClient()
+	client.runtimeSecrets = []string{"EXISTING_SECRET"}
+	desired := &Worker{
+		WorkerName:     "tfh-website-dev",
+		RuntimeSecrets: []string{"EXISTING_SECRET"},
+	}
+
+	rec := New(client)
+	if err := rec.syncRuntimeSecrets(ctx, desired, runtimeSecretSyncOptions{
+		requireAllSecrets: true,
+		refreshExisting:   true,
+	}); err != nil {
+		t.Fatalf("syncRuntimeSecrets() error = %v", err)
+	}
+
+	if got := client.runtimeSecretSets; !equalStringSets(got, []string{"EXISTING_SECRET"}) {
+		t.Fatalf("runtime secret sets = %v, want EXISTING_SECRET", got)
+	}
+}
+
+func TestSyncRuntimeSecretsWithPruneDeletesUndeclaredRuntimeSecrets(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("DECLARED_SECRET", "rotated")
+
+	client := newFakeClient()
+	client.runtimeSecrets = []string{"DECLARED_SECRET", "EXTRA_SECRET"}
+	desired := &Worker{
+		WorkerName:     "tfh-website-dev",
+		RuntimeSecrets: []string{"DECLARED_SECRET"},
+	}
+
+	rec := New(client)
+	if err := rec.syncRuntimeSecrets(ctx, desired, runtimeSecretSyncOptions{
+		requireAllSecrets: true,
+		refreshExisting:   true,
+		prune:             true,
+	}); err != nil {
+		t.Fatalf("syncRuntimeSecrets() error = %v", err)
+	}
+
+	if got := client.runtimeSecretSets; !equalStringSets(got, []string{"DECLARED_SECRET"}) {
+		t.Fatalf("runtime secret sets = %v, want DECLARED_SECRET", got)
+	}
+	if got := client.runtimeSecretDeletes; !equalStringSets(got, []string{"EXTRA_SECRET"}) {
+		t.Fatalf("runtime secret deletes = %v, want EXTRA_SECRET", got)
+	}
+	if got := client.runtimeSecrets; !equalStringSets(got, []string{"DECLARED_SECRET"}) {
+		t.Fatalf("runtime secrets = %v, want DECLARED_SECRET", got)
+	}
+}
+
 func TestApplyWithOptionsSkipsNonProductionBranchWhenPreviewDisabled(t *testing.T) {
 	ctx := context.Background()
 
@@ -474,6 +571,127 @@ func TestApplyCreatesPreviewTriggerWithProductionRepoConnection(t *testing.T) {
 	}
 	if got := client.triggers[1].RepoConnectionUUID; got != "repo-existing" {
 		t.Fatalf("preview RepoConnectionUUID = %q, want repo-existing", got)
+	}
+}
+
+func TestRepoConnectionUUIDReadsExistingTrigger(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:        "preview",
+			RepoConnectionUUID: "repo-production",
+			BranchIncludes:     []string{"*"},
+			BranchExcludes:     []string{"main"},
+		},
+		{
+			TriggerUUID:        "prod",
+			RepoConnectionUUID: "repo-production",
+			BranchIncludes:     []string{"main"},
+		},
+	}
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+	}
+
+	rec := New(client)
+	got, err := rec.RepoConnectionUUID(ctx, desired)
+	if err != nil {
+		t.Fatalf("RepoConnectionUUID() error = %v", err)
+	}
+	if got != "repo-production" {
+		t.Fatalf("RepoConnectionUUID() = %q, want repo-production", got)
+	}
+	if client.createRepoConnectionCalls != 0 {
+		t.Fatalf("CreateRepoConnection() calls = %d, want 0", client.createRepoConnectionCalls)
+	}
+}
+
+func TestRepoConnectionUUIDFallsBackToPreviewTrigger(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID: "preview",
+			RepoConnection: RepoConnection{
+				RepoConnectionUUID: "repo-preview",
+			},
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"main"},
+		},
+	}
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+	}
+
+	rec := New(client)
+	got, err := rec.RepoConnectionUUID(ctx, desired)
+	if err != nil {
+		t.Fatalf("RepoConnectionUUID() error = %v", err)
+	}
+	if got != "repo-preview" {
+		t.Fatalf("RepoConnectionUUID() = %q, want repo-preview", got)
+	}
+}
+
+func TestRepoConnectionUUIDPrefersExistingTriggerOverConfiguredValue(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:        "prod",
+			RepoConnectionUUID: "repo-production",
+			BranchIncludes:     []string{"main"},
+		},
+	}
+	desired := &Worker{
+		WorkerName:         "tfh-website-dev",
+		Repo:               "worldcoin/tfh-website",
+		RepoConnectionUUID: "repo-stale",
+		ProductionBranch:   "main",
+	}
+
+	rec := New(client)
+	got, err := rec.RepoConnectionUUID(ctx, desired)
+	if err != nil {
+		t.Fatalf("RepoConnectionUUID() error = %v", err)
+	}
+	if got != "repo-production" {
+		t.Fatalf("RepoConnectionUUID() = %q, want repo-production", got)
+	}
+	if client.createRepoConnectionCalls != 0 {
+		t.Fatalf("CreateRepoConnection() calls = %d, want 0", client.createRepoConnectionCalls)
+	}
+}
+
+func TestRepoConnectionUUIDFallsBackToConfiguredValue(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	desired := &Worker{
+		WorkerName:         "tfh-website-dev",
+		Repo:               "worldcoin/tfh-website",
+		RepoConnectionUUID: "repo-configured",
+		ProductionBranch:   "main",
+	}
+
+	rec := New(client)
+	got, err := rec.RepoConnectionUUID(ctx, desired)
+	if err != nil {
+		t.Fatalf("RepoConnectionUUID() error = %v", err)
+	}
+	if got != "repo-configured" {
+		t.Fatalf("RepoConnectionUUID() = %q, want repo-configured", got)
+	}
+	if client.createRepoConnectionCalls != 0 {
+		t.Fatalf("CreateRepoConnection() calls = %d, want 0", client.createRepoConnectionCalls)
 	}
 }
 
@@ -630,6 +848,8 @@ type fakeClient struct {
 	buildVars                 map[string]map[string]BuildEnvVar
 	buildTokens               []BuildToken
 	runtimeSecrets            []string
+	runtimeSecretSets         []string
+	runtimeSecretDeletes      []string
 	triggeredBuilds           []triggeredBuild
 	createRepoConnectionCalls int
 	lookupGitHubRepoCalls     int
@@ -751,6 +971,17 @@ func (f *fakeClient) ListRuntimeSecrets(context.Context, string) ([]string, erro
 }
 
 func (f *fakeClient) SetRuntimeSecret(_ context.Context, _ string, name, _ string) error {
-	f.runtimeSecrets = append(f.runtimeSecrets, name)
+	f.runtimeSecretSets = append(f.runtimeSecretSets, name)
+	if !slices.Contains(f.runtimeSecrets, name) {
+		f.runtimeSecrets = append(f.runtimeSecrets, name)
+	}
+	return nil
+}
+
+func (f *fakeClient) DeleteRuntimeSecret(_ context.Context, _ string, name string) error {
+	f.runtimeSecretDeletes = append(f.runtimeSecretDeletes, name)
+	f.runtimeSecrets = slices.DeleteFunc(f.runtimeSecrets, func(secret string) bool {
+		return secret == name
+	})
 	return nil
 }

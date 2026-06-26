@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	defaultConfigPath   = "cf-worker-config.json"
-	cloudflareAPIEnvVar = "CLOUDFLARE_API_TOKEN"
+	defaultConfigPath         = "cf-worker-config.json"
+	cloudflareAPIEnvVar       = "CLOUDFLARE_API_TOKEN"
+	cloudflareAccountIDEnvVar = "CLOUDFLARE_ACCOUNT_ID"
 )
 
 // Run parses arguments and dispatches to the appropriate command.
@@ -66,6 +67,30 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		return fmt.Errorf("%s environment variable is required", cloudflareAPIEnvVar)
 	}
 
+	ctx := context.Background()
+
+	if cmd == "get-repo-connection" {
+		accountID := strings.TrimSpace(*flags.AccountID)
+		if accountID == "" {
+			accountID = strings.TrimSpace(getenv(cloudflareAccountIDEnvVar))
+		}
+		if accountID == "" {
+			return fmt.Errorf("%s environment variable or --account-id is required", cloudflareAccountIDEnvVar)
+		}
+		rec := New(NewClient(token, accountID))
+		desired := &Worker{
+			WorkerName:       *flags.WorkerKey,
+			ProductionBranch: *flags.ProductionBranch,
+		}
+		uuid, err := rec.RepoConnectionUUID(ctx, desired)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(stdout, "repo_connection_uuid: %s\n", uuid)
+		_, _ = fmt.Fprintf(stdout, "\"repo_connection_uuid\": %q\n", uuid)
+		return nil
+	}
+
 	cfg, err := Load(*flags.ConfigPath)
 	if err != nil {
 		return err
@@ -73,7 +98,6 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 
 	client := NewClient(token, cfg.AccountID)
 	rec := New(client)
-	ctx := context.Background()
 
 	switch cmd {
 	case "plan":
@@ -127,19 +151,27 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		if err != nil {
 			return err
 		}
-		return rec.SyncRuntimeSecrets(ctx, desired)
+		return rec.syncRuntimeSecrets(ctx, desired, runtimeSecretSyncOptions{
+			requireAllSecrets: true,
+			refreshExisting:   true,
+			prune:             *flags.Prune,
+		})
+
 	}
 
 	return fmt.Errorf("unhandled command: %s", cmd)
 }
 
 type commandFlags struct {
-	ConfigPath   *string
-	WorkerKey    *string
-	FailOnDrift  *bool
-	TriggerBuild *bool
-	BuildBranch  *string
-	BuildCommit  *string
+	ConfigPath       *string
+	WorkerKey        *string
+	FailOnDrift      *bool
+	TriggerBuild     *bool
+	BuildBranch      *string
+	BuildCommit      *string
+	AccountID        *string
+	ProductionBranch *string
+	Prune            *bool
 }
 
 func newCommandFlagSet(cmd string, output io.Writer) (*flag.FlagSet, commandFlags) {
@@ -147,19 +179,30 @@ func newCommandFlagSet(cmd string, output io.Writer) (*flag.FlagSet, commandFlag
 	fs.SetOutput(output)
 	flags := commandFlags{
 		ConfigPath:  fs.String("config", defaultConfigPath, "path to config file"),
-		WorkerKey:   fs.String("worker", "", "worker key from config"),
+		WorkerKey:   fs.String("worker", "", "worker key from config, or worker name for get-repo-connection"),
 		FailOnDrift: fs.Bool("fail-on-drift", false, "exit 1 if plan has changes (for CI drift checks)"),
 	}
-	if cmd == "apply" {
+	switch cmd {
+	case "apply":
 		flags.TriggerBuild = fs.Bool("trigger-build", true, "queue a Workers Build after a successful apply")
 		flags.BuildBranch = fs.String("build-branch", "", "branch to build after apply (default: GitHub Actions/git branch, then production_branch)")
 		flags.BuildCommit = fs.String("build-commit", "", "commit hash to build after apply (default: GitHub Actions/git SHA when available)")
-	} else {
-		disabled := false
-		empty := ""
+	case "sync-runtime-secrets":
+		flags.Prune = fs.Bool("prune", false, "delete runtime secrets from Cloudflare when they are not listed in config")
+	case "get-repo-connection":
+		flags.AccountID = fs.String("account-id", "", "Cloudflare account ID (default: CLOUDFLARE_ACCOUNT_ID)")
+		flags.ProductionBranch = fs.String("production-branch", "main", "production branch used to identify the production trigger")
+	default:
+		var (
+			disabled bool
+			empty    string
+		)
 		flags.TriggerBuild = &disabled
 		flags.BuildBranch = &empty
 		flags.BuildCommit = &empty
+		flags.AccountID = &empty
+		flags.ProductionBranch = &empty
+		flags.Prune = &disabled
 	}
 	fs.Usage = func() {
 		printCommandUsage(fs.Output(), cmd)
@@ -196,7 +239,7 @@ func printHelp(args []string, stdout, stderr io.Writer) error {
 
 func isKnownCommand(cmd string) bool {
 	switch cmd {
-	case "plan", "apply", "status", "sync-build-vars", "sync-runtime-secrets":
+	case "plan", "apply", "status", "sync-build-vars", "sync-runtime-secrets", "get-repo-connection":
 		return true
 	default:
 		return false
@@ -228,6 +271,7 @@ Commands:
   status               Show current CF state for a worker
   sync-build-vars      Sync all build vars/secrets to trigger
   sync-runtime-secrets Sync all runtime secrets to worker
+  get-repo-connection  Print the repo_connection_uuid for a worker
 `)
 }
 
@@ -243,11 +287,12 @@ Commands:
   status               Show current CF state for a worker
   sync-build-vars      Sync all build vars/secrets to trigger
   sync-runtime-secrets Sync all runtime secrets to worker
+  get-repo-connection  Print the repo_connection_uuid for a worker
 `, cmd)
 }
 
 func printEnvironment(w io.Writer) {
-	writeUsage(w, "\nEnvironment:\n  %s  Cloudflare API token (user-scoped, Workers Builds Configuration: Edit + Workers Scripts: Edit)\n", cloudflareAPIEnvVar)
+	writeUsage(w, "\nEnvironment:\n  %s  Cloudflare API token (user-scoped, Workers Builds Configuration: Edit + Workers Scripts: Edit)\n  %s  Cloudflare account ID for get-repo-connection when --account-id is not set\n", cloudflareAPIEnvVar, cloudflareAccountIDEnvVar)
 }
 
 func resolveBuildBranch(desired *Worker, override string, getenv func(string) string) string {
