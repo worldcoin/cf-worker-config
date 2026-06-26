@@ -178,6 +178,26 @@ func TestListRuntimeSecretsReturnsOtherCloudflareErrors(t *testing.T) {
 	}
 }
 
+func TestDeleteRuntimeSecretDeletesSecretByName(t *testing.T) {
+	client := NewClient("token", "account-id")
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodDelete {
+				t.Fatalf("method = %s, want DELETE", req.Method)
+			}
+			wantPath := "/client/v4/accounts/account-id/workers/scripts/tfh-website-dev/secrets/secret%2Fname"
+			if req.URL.EscapedPath() != wantPath {
+				t.Fatalf("path = %q, want %q", req.URL.EscapedPath(), wantPath)
+			}
+			return jsonResponse(http.StatusOK, `{"success": true}`), nil
+		}),
+	}
+
+	if err := client.DeleteRuntimeSecret(context.Background(), "tfh-website-dev", "secret/name"); err != nil {
+		t.Fatalf("DeleteRuntimeSecret() error = %v, want nil", err)
+	}
+}
+
 func TestTriggerBuildPostsBranchAndCommit(t *testing.T) {
 	client := NewClient("token", "account-id")
 	client.http = &http.Client{
@@ -212,6 +232,29 @@ func TestTriggerBuildPostsBranchAndCommit(t *testing.T) {
 	}
 	if build.BuildUUID != "build-1" {
 		t.Fatalf("BuildUUID = %q, want build-1", build.BuildUUID)
+	}
+}
+
+func TestDoJSONSetsCloudflareHeaders(t *testing.T) {
+	client := NewClient("token", "account-id")
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "Bearer token" {
+				t.Fatalf("Authorization header = %q, want bearer token", got)
+			}
+			if got := req.Header.Get("User-Agent"); got != "cf-worker-config" {
+				t.Fatalf("User-Agent header = %q, want cf-worker-config", got)
+			}
+			if got := req.Header.Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type header = %q, want application/json", got)
+			}
+			return jsonResponse(http.StatusOK, `{"success": true}`), nil
+		}),
+	}
+
+	err := client.doJSON(context.Background(), http.MethodPatch, client.cfURL("builds", "triggers", "trigger-id"), map[string]string{"name": "value"}, nil)
+	if err != nil {
+		t.Fatalf("doJSON() error = %v, want nil", err)
 	}
 }
 

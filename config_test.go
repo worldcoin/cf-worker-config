@@ -23,6 +23,9 @@ func TestLoad(t *testing.T) {
 				if cfg.AccountID != "account-123" {
 					t.Fatalf("AccountID = %q, want account-123", cfg.AccountID)
 				}
+				if cfg.Repo != "worldcoin/tfh-website" {
+					t.Fatalf("Repo = %q, want worldcoin/tfh-website", cfg.Repo)
+				}
 				if worker.WorkerName != "tfh-website-dev" {
 					t.Fatalf("WorkerName = %q, want tfh-website-dev", worker.WorkerName)
 				}
@@ -38,10 +41,16 @@ func TestLoad(t *testing.T) {
 			name:       "full valid config",
 			fixture:    "full.json",
 			wantWorker: "tfh-website",
-			assert: func(t *testing.T, _ *Config, worker *Worker) {
+			assert: func(t *testing.T, cfg *Config, worker *Worker) {
 				t.Helper()
+				if cfg.RepoConnectionUUID != "repo-connection-123" {
+					t.Fatalf("Config.RepoConnectionUUID = %q, want repo-connection-123", cfg.RepoConnectionUUID)
+				}
 				if worker.RepoConnectionUUID != "repo-connection-123" {
 					t.Fatalf("RepoConnectionUUID = %q, want repo-connection-123", worker.RepoConnectionUUID)
+				}
+				if worker.ProviderAccountID != "42" {
+					t.Fatalf("ProviderAccountID = %q, want 42", worker.ProviderAccountID)
 				}
 				if worker.BuildTokenName != "tfh-build-token" {
 					t.Fatalf("BuildTokenName = %q, want tfh-build-token", worker.BuildTokenName)
@@ -74,9 +83,19 @@ func TestLoad(t *testing.T) {
 			wantErr: "account_id is required",
 		},
 		{
-			name:    "missing worker name",
-			fixture: "missing-worker-name.json",
-			wantErr: `worker "tfh-website-dev": worker_name is required`,
+			name:    "missing repo",
+			fixture: "missing-repo.json",
+			wantErr: "repo is required",
+		},
+		{
+			name:    "worker repo field rejected",
+			fixture: "worker-repo-field.json",
+			wantErr: `json: unknown field "repo"`,
+		},
+		{
+			name:    "worker name field rejected",
+			fixture: "worker-name-field.json",
+			wantErr: `json: unknown field "worker_name"`,
 		},
 		{
 			name:    "missing preview command",

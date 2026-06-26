@@ -92,18 +92,19 @@ func (c *Client) GetWorkerTag(ctx context.Context, workerName string) (string, e
 
 // Trigger represents a Workers Builds trigger.
 type Trigger struct {
-	TriggerUUID         string   `json:"trigger_uuid"`
-	TriggerName         string   `json:"trigger_name"`
-	RepoConnectionUUID  string   `json:"repo_connection_uuid"`
-	BuildCommand        string   `json:"build_command"`
-	DeployCommand       string   `json:"deploy_command"`
-	RootDirectory       string   `json:"root_directory"`
-	BranchIncludes      []string `json:"branch_includes"`
-	BranchExcludes      []string `json:"branch_excludes"`
-	PathIncludes        []string `json:"path_includes"`
-	PathExcludes        []string `json:"path_excludes"`
-	BuildCachingEnabled *bool    `json:"build_caching_enabled"`
-	BuildTokenUUID      string   `json:"build_token_uuid"`
+	TriggerUUID         string         `json:"trigger_uuid"`
+	TriggerName         string         `json:"trigger_name"`
+	RepoConnectionUUID  string         `json:"repo_connection_uuid"`
+	RepoConnection      RepoConnection `json:"repo_connection"`
+	BuildCommand        string         `json:"build_command"`
+	DeployCommand       string         `json:"deploy_command"`
+	RootDirectory       string         `json:"root_directory"`
+	BranchIncludes      []string       `json:"branch_includes"`
+	BranchExcludes      []string       `json:"branch_excludes"`
+	PathIncludes        []string       `json:"path_includes"`
+	PathExcludes        []string       `json:"path_excludes"`
+	BuildCachingEnabled *bool          `json:"build_caching_enabled"`
+	BuildTokenUUID      string         `json:"build_token_uuid"`
 }
 
 // ListTriggers returns all triggers for a worker.
@@ -341,6 +342,12 @@ func (c *Client) SetRuntimeSecret(ctx context.Context, workerName, name, value s
 	return c.doJSON(ctx, "PUT", apiURL, body, nil)
 }
 
+// DeleteRuntimeSecret deletes a single runtime secret from a worker.
+func (c *Client) DeleteRuntimeSecret(ctx context.Context, workerName, name string) error {
+	apiURL := c.cfURL("workers", "scripts", workerName, "secrets", name)
+	return c.doJSON(ctx, "DELETE", apiURL, nil, nil)
+}
+
 // --- URL construction ---
 
 // cfURL builds a Cloudflare API URL by appending escaped path segments.
@@ -429,6 +436,7 @@ func (c *Client) doJSON(ctx context.Context, method, apiURL string, body any, re
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", "cf-worker-config")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

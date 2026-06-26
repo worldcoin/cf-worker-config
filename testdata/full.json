@@ -1,15 +1,14 @@
 {
   "account_id": "account-123",
+  "repo": "worldcoin/tfh-website",
+  "repo_connection_uuid": "repo-connection-123",
+  "provider_type": "github",
+  "provider_account_id": "42",
+  "provider_account_name": "worldcoin",
+  "repo_id": "100",
+  "repo_name": "tfh-website",
   "workers": {
     "tfh-website": {
-      "worker_name": "tfh-website",
-      "repo": "worldcoin/tfh-website",
-      "repo_connection_uuid": "repo-connection-123",
-      "provider_type": "github",
-      "provider_account_id": "42",
-      "provider_account_name": "worldcoin",
-      "repo_id": "100",
-      "repo_name": "tfh-website",
       "build_token_name": "tfh-build-token",
       "production_branch": "prod",
       "root_directory": "apps/tfh-website",
