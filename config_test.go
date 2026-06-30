@@ -67,8 +67,8 @@ func TestLoad(t *testing.T) {
 				if !equalStringSets(worker.Preview.BranchIncludes, []string{"*"}) {
 					t.Fatalf("Preview.BranchIncludes = %v, want [*]", worker.Preview.BranchIncludes)
 				}
-				if !equalStringSets(worker.Preview.BranchExcludes, []string{"prod", "promote-*-to-prod"}) {
-					t.Fatalf("Preview.BranchExcludes = %v, want [prod promote-*-to-prod]", worker.Preview.BranchExcludes)
+				if !equalStringSets(worker.Preview.BranchExcludes, []string{"prod", "promote-main-to-prod"}) {
+					t.Fatalf("Preview.BranchExcludes = %v, want [prod promote-main-to-prod]", worker.Preview.BranchExcludes)
 				}
 				if worker.Preview.BuildVars["NEXT_PUBLIC_APP_ENV"] != "preview" {
 					t.Fatalf("preview NEXT_PUBLIC_APP_ENV = %q, want preview", worker.Preview.BuildVars["NEXT_PUBLIC_APP_ENV"])
@@ -112,6 +112,11 @@ func TestLoad(t *testing.T) {
 			name:    "empty preview branch includes",
 			fixture: "empty-preview-branch-includes.json",
 			wantErr: `worker "tfh-website-dev": preview.branch_includes must not be empty when set`,
+		},
+		{
+			name:    "unsupported preview branch glob",
+			fixture: "unsupported-preview-branch-glob.json",
+			wantErr: `worker "tfh-website-dev": preview.branch_excludes pattern "promote-*-to-prod" is not supported`,
 		},
 		{
 			name:    "unknown field",

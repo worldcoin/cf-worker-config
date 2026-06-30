@@ -34,7 +34,7 @@ Create a `cf-worker-config.json` in your repo. This is strict JSON, not JSONC:
         "enabled": true,
         "command": "npm run deploy:cf:preview",
         "branch_includes": ["*"],
-        "branch_excludes": ["main", "prod", "promote-*-to-prod"],
+        "branch_excludes": ["main", "prod", "promote-main-to-prod"],
         "build_vars": {
           "NEXT_PUBLIC_APP_ENV": "preview"
         }
@@ -83,6 +83,9 @@ Preview branch filters are optional. If `preview.branch_includes` and
 dashboard default: include all branches (`["*"]`) and exclude the worker's
 `production_branch`. Configure these fields when multiple Workers are connected
 to the same repo and each environment needs its own preview branch scope.
+Cloudflare supports `*` as the all-branches wildcard and exact branch names;
+partial glob patterns such as `promote-*-to-prod` are not supported by the
+Workers Builds API.
 
 The config parser uses Go's standard `encoding/json` with unknown fields rejected.
 This keeps the tool dependency-free and catches typos in config keys.

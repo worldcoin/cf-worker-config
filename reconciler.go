@@ -1003,27 +1003,7 @@ func branchAllowed(branch string, includes, excludes []string) bool {
 }
 
 func branchMatches(pattern, branch string) bool {
-	if pattern == branch || pattern == "*" {
-		return true
-	}
-
-	parts := strings.Split(pattern, "*")
-	if len(parts) == 1 {
-		return false
-	}
-
-	if !strings.HasPrefix(branch, parts[0]) {
-		return false
-	}
-	remaining := branch[len(parts[0]):]
-	for _, part := range parts[1 : len(parts)-1] {
-		idx := strings.Index(remaining, part)
-		if idx < 0 {
-			return false
-		}
-		remaining = remaining[idx+len(part):]
-	}
-	return strings.HasSuffix(remaining, parts[len(parts)-1])
+	return pattern == "*" || pattern == branch
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

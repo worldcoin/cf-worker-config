@@ -201,7 +201,7 @@ func TestApplyCreatesPreviewTriggerWithCustomBranchFilters(t *testing.T) {
 		Preview: Preview{
 			Enabled:        true,
 			Command:        "npm run deploy:cf:preview",
-			BranchIncludes: []string{"promote-*-to-prod"},
+			BranchIncludes: []string{"promote-main-to-prod"},
 			BranchExcludes: []string{"prod"},
 		},
 	}
@@ -219,8 +219,8 @@ func TestApplyCreatesPreviewTriggerWithCustomBranchFilters(t *testing.T) {
 		t.Fatalf("trigger count = %d, want 2", len(client.triggers))
 	}
 	preview := client.triggers[1]
-	if got := preview.BranchIncludes; !equalStringSets(got, []string{"promote-*-to-prod"}) {
-		t.Fatalf("preview BranchIncludes = %v, want [promote-*-to-prod]", got)
+	if got := preview.BranchIncludes; !equalStringSets(got, []string{"promote-main-to-prod"}) {
+		t.Fatalf("preview BranchIncludes = %v, want [promote-main-to-prod]", got)
 	}
 	if got := preview.BranchExcludes; !equalStringSets(got, []string{"prod"}) {
 		t.Fatalf("preview BranchExcludes = %v, want [prod]", got)
@@ -261,7 +261,7 @@ func TestApplyUpdatesExistingPreviewTriggerWithCustomBranchFilters(t *testing.T)
 		Preview: Preview{
 			Enabled:        true,
 			Command:        "npm run deploy:cf:preview",
-			BranchIncludes: []string{"promote-*-to-prod"},
+			BranchIncludes: []string{"promote-main-to-prod"},
 			BranchExcludes: []string{"prod"},
 		},
 	}
@@ -275,8 +275,8 @@ func TestApplyUpdatesExistingPreviewTriggerWithCustomBranchFilters(t *testing.T)
 		t.Fatalf("Apply() error = %v", err)
 	}
 
-	if got := client.triggers[1].BranchIncludes; !equalStringSets(got, []string{"promote-*-to-prod"}) {
-		t.Fatalf("preview BranchIncludes = %v, want [promote-*-to-prod]", got)
+	if got := client.triggers[1].BranchIncludes; !equalStringSets(got, []string{"promote-main-to-prod"}) {
+		t.Fatalf("preview BranchIncludes = %v, want [promote-main-to-prod]", got)
 	}
 	if got := client.triggers[1].BranchExcludes; !equalStringSets(got, []string{"prod"}) {
 		t.Fatalf("preview BranchExcludes = %v, want [prod]", got)
@@ -433,7 +433,7 @@ func TestApplyWithOptionsSkipsPreviewBuildWhenBranchDoesNotMatchFilters(t *testi
 			DeployCommand:  "npm run deploy:cf:preview",
 			RootDirectory:  ".",
 			BranchIncludes: []string{"*"},
-			BranchExcludes: []string{"main", "prod", "promote-*-to-prod"},
+			BranchExcludes: []string{"main", "prod", "promote-main-to-prod"},
 		},
 	}
 
@@ -448,7 +448,7 @@ func TestApplyWithOptionsSkipsPreviewBuildWhenBranchDoesNotMatchFilters(t *testi
 			Enabled:        true,
 			Command:        "npm run deploy:cf:preview",
 			BranchIncludes: []string{"*"},
-			BranchExcludes: []string{"main", "prod", "promote-*-to-prod"},
+			BranchExcludes: []string{"main", "prod", "promote-main-to-prod"},
 		},
 	}
 
@@ -1030,23 +1030,23 @@ func TestBranchAllowed(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "excluded by wildcard pattern",
+			name:     "excluded by exact branch",
 			branch:   "promote-main-to-prod",
 			includes: []string{"*"},
-			excludes: []string{"promote-*-to-prod"},
+			excludes: []string{"promote-main-to-prod"},
 			want:     false,
 		},
 		{
-			name:     "included by wildcard pattern",
+			name:     "included by exact branch",
 			branch:   "promote-main-to-prod",
-			includes: []string{"promote-*-to-prod"},
+			includes: []string{"promote-main-to-prod"},
 			excludes: []string{"prod"},
 			want:     true,
 		},
 		{
 			name:     "not included",
 			branch:   "feature/foo",
-			includes: []string{"promote-*-to-prod"},
+			includes: []string{"promote-main-to-prod"},
 			want:     false,
 		},
 	}

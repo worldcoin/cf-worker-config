@@ -157,10 +157,16 @@ func validatePreviewBranchFilters(workerName string, preview Preview) error {
 		if strings.TrimSpace(pattern) == "" {
 			return fmt.Errorf("worker %q: preview.branch_includes contains an empty pattern", workerName)
 		}
+		if strings.Contains(pattern, "*") && pattern != "*" {
+			return fmt.Errorf("worker %q: preview.branch_includes pattern %q is not supported; use \"*\" or an exact branch name", workerName, pattern)
+		}
 	}
 	for _, pattern := range preview.BranchExcludes {
 		if strings.TrimSpace(pattern) == "" {
 			return fmt.Errorf("worker %q: preview.branch_excludes contains an empty pattern", workerName)
+		}
+		if strings.Contains(pattern, "*") && pattern != "*" {
+			return fmt.Errorf("worker %q: preview.branch_excludes pattern %q is not supported; use \"*\" or an exact branch name", workerName, pattern)
 		}
 	}
 	return nil
