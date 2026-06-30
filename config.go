@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config is the top-level configuration for cf-worker-config.
@@ -49,10 +50,12 @@ type Worker struct {
 
 // Preview configures non-production branch builds.
 type Preview struct {
-	Enabled      bool              `json:"enabled"`
-	Command      string            `json:"command"`
-	BuildVars    map[string]string `json:"build_vars"`
-	BuildSecrets []string          `json:"build_secrets"`
+	Enabled        bool              `json:"enabled"`
+	Command        string            `json:"command"`
+	BranchIncludes []string          `json:"branch_includes"`
+	BranchExcludes []string          `json:"branch_excludes"`
+	BuildVars      map[string]string `json:"build_vars"`
+	BuildSecrets   []string          `json:"build_secrets"`
 }
 
 // Load reads and parses a cf-worker-config.json file from the current directory tree.
@@ -113,6 +116,9 @@ func Load(configPath string) (*Config, error) {
 		if w.Preview.Enabled && w.Preview.Command == "" {
 			return nil, fmt.Errorf("worker %q: preview.command is required when preview.enabled=true", name)
 		}
+		if err := validatePreviewBranchFilters(name, w.Preview); err != nil {
+			return nil, err
+		}
 		cfg.Workers[name] = w
 	}
 
@@ -141,6 +147,29 @@ func applyRepoDefaults(w *Worker, cfg Config) {
 	if w.RepoName == "" {
 		w.RepoName = cfg.RepoName
 	}
+}
+
+func validatePreviewBranchFilters(workerName string, preview Preview) error {
+	if preview.BranchIncludes != nil && len(preview.BranchIncludes) == 0 {
+		return fmt.Errorf("worker %q: preview.branch_includes must not be empty when set", workerName)
+	}
+	for _, pattern := range preview.BranchIncludes {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("worker %q: preview.branch_includes contains an empty pattern", workerName)
+		}
+		if strings.Contains(pattern, "*") && pattern != "*" {
+			return fmt.Errorf("worker %q: preview.branch_includes pattern %q is not supported; use \"*\" or an exact branch name", workerName, pattern)
+		}
+	}
+	for _, pattern := range preview.BranchExcludes {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("worker %q: preview.branch_excludes contains an empty pattern", workerName)
+		}
+		if strings.Contains(pattern, "*") && pattern != "*" {
+			return fmt.Errorf("worker %q: preview.branch_excludes pattern %q is not supported; use \"*\" or an exact branch name", workerName, pattern)
+		}
+	}
+	return nil
 }
 
 // GetWorker returns the configuration for a specific worker, or an error if not found.

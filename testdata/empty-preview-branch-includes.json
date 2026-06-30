@@ -1,0 +1,16 @@
+{
+  "account_id": "account-123",
+  "repo": "worldcoin/tfh-website",
+  "workers": {
+    "tfh-website-dev": {
+      "production_branch": "main",
+      "build_command": "npm run build:cf",
+      "deploy_command": "npm run deploy:cf",
+      "preview": {
+        "enabled": true,
+        "command": "npm run deploy:cf:preview",
+        "branch_includes": []
+      }
+    }
+  }
+}

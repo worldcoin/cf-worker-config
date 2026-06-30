@@ -111,7 +111,7 @@ func (r *Reconciler) Plan(ctx context.Context, desired *Worker) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	previewTrigger, err := findPreviewTrigger(triggers, desired.ProductionBranch)
+	previewTrigger, err := findPreviewTrigger(triggers, desired)
 	if err != nil {
 		return nil, err
 	}
@@ -298,6 +298,10 @@ func (r *Reconciler) triggerBuild(ctx context.Context, desired *Worker, workerTa
 			fmt.Printf("Skipping Workers Build trigger for branch %q: preview builds are disabled for worker %s.\n", branch, desired.WorkerName)
 			return nil
 		}
+		if !branchAllowed(branch, previewBranchIncludes(desired), previewBranchExcludes(desired)) {
+			fmt.Printf("Skipping Workers Build trigger for branch %q: branch does not match preview filters for worker %s.\n", branch, desired.WorkerName)
+			return nil
+		}
 		kind = "preview"
 	}
 
@@ -305,7 +309,7 @@ func (r *Reconciler) triggerBuild(ctx context.Context, desired *Worker, workerTa
 	if err != nil {
 		return fmt.Errorf("listing triggers for build trigger: %w", err)
 	}
-	trigger, err := findTrigger(triggers, desired.ProductionBranch, kind)
+	trigger, err := findTrigger(triggers, desired, kind)
 	if err != nil {
 		return err
 	}
@@ -382,8 +386,8 @@ func (r *Reconciler) createPreviewTrigger(ctx context.Context, desired *Worker, 
 		BuildCommand:        desired.BuildCommand,
 		DeployCommand:       desired.Preview.Command,
 		RootDirectory:       desired.RootDirectory,
-		BranchIncludes:      []string{"*"},
-		BranchExcludes:      []string{desired.ProductionBranch},
+		BranchIncludes:      previewBranchIncludes(desired),
+		BranchExcludes:      previewBranchExcludes(desired),
 		PathIncludes:        desired.PathIncludes,
 		PathExcludes:        desired.PathExcludes,
 		BuildCachingEnabled: desired.BuildCachingEnabled,
@@ -416,7 +420,7 @@ func (r *Reconciler) updateTrigger(ctx context.Context, desired *Worker, workerT
 	if err != nil {
 		return err
 	}
-	trigger, err := findTrigger(triggers, desired.ProductionBranch, kind)
+	trigger, err := findTrigger(triggers, desired, kind)
 	if err != nil {
 		return err
 	}
@@ -438,8 +442,8 @@ func (r *Reconciler) updateTrigger(ctx context.Context, desired *Worker, workerT
 		params.BranchExcludes = []string{}
 	case "preview":
 		params.DeployCommand = desired.Preview.Command
-		params.BranchIncludes = []string{"*"}
-		params.BranchExcludes = []string{desired.ProductionBranch}
+		params.BranchIncludes = previewBranchIncludes(desired)
+		params.BranchExcludes = previewBranchExcludes(desired)
 	default:
 		return fmt.Errorf("unknown trigger kind %q", kind)
 	}
@@ -461,7 +465,7 @@ func (r *Reconciler) getTriggerUUID(ctx context.Context, desired *Worker, worker
 	if err != nil {
 		return "", err
 	}
-	trigger, err := findTrigger(triggers, desired.ProductionBranch, kind)
+	trigger, err := findTrigger(triggers, desired, kind)
 	if err != nil {
 		return "", err
 	}
@@ -557,7 +561,7 @@ func (r *Reconciler) RepoConnectionUUID(ctx context.Context, desired *Worker) (s
 		return prodTrigger.repoConnectionUUID(), nil
 	}
 
-	previewTrigger, err := findPreviewTrigger(triggers, desired.ProductionBranch)
+	previewTrigger, err := findPreviewTrigger(triggers, desired)
 	if err != nil {
 		return "", err
 	}
@@ -748,8 +752,8 @@ func (r *Reconciler) diffTrigger(kind string, current *Trigger, desired *Worker)
 	var branchExcludes []string
 	if kind == "preview" {
 		deployCommand = desired.Preview.Command
-		branchIncludes = []string{"*"}
-		branchExcludes = []string{desired.ProductionBranch}
+		branchIncludes = previewBranchIncludes(desired)
+		branchExcludes = previewBranchExcludes(desired)
 	}
 
 	if current.BuildCommand != desired.BuildCommand {
@@ -872,7 +876,7 @@ func (r *Reconciler) resolveBuildToken(ctx context.Context, desired *Worker) (st
 }
 
 func findProductionTrigger(triggers []Trigger, productionBranch string) (*Trigger, error) {
-	return findTrigger(triggers, productionBranch, "production")
+	return findTrigger(triggers, &Worker{ProductionBranch: productionBranch}, "production")
 }
 
 func (t Trigger) repoConnectionUUID() string {
@@ -882,17 +886,17 @@ func (t Trigger) repoConnectionUUID() string {
 	return t.RepoConnection.RepoConnectionUUID
 }
 
-func findPreviewTrigger(triggers []Trigger, productionBranch string) (*Trigger, error) {
-	return findTrigger(triggers, productionBranch, "preview")
+func findPreviewTrigger(triggers []Trigger, desired *Worker) (*Trigger, error) {
+	return findTrigger(triggers, desired, "preview")
 }
 
-func findTrigger(triggers []Trigger, productionBranch, kind string) (*Trigger, error) {
+func findTrigger(triggers []Trigger, desired *Worker, kind string) (*Trigger, error) {
 	for i := range triggers {
 		trigger := &triggers[i]
-		if kind == "production" && equalStringSets(trigger.BranchIncludes, []string{productionBranch}) && len(trigger.BranchExcludes) == 0 {
+		if kind == "production" && equalStringSets(trigger.BranchIncludes, []string{desired.ProductionBranch}) && len(trigger.BranchExcludes) == 0 {
 			return trigger, nil
 		}
-		if kind == "preview" && equalStringSets(trigger.BranchIncludes, []string{"*"}) && slices.Contains(trigger.BranchExcludes, productionBranch) {
+		if kind == "preview" && equalStringSets(trigger.BranchIncludes, previewBranchIncludes(desired)) && equalStringSets(trigger.BranchExcludes, previewBranchExcludes(desired)) {
 			return trigger, nil
 		}
 	}
@@ -967,6 +971,39 @@ func previewBuildSecrets(desired *Worker) []string {
 		return append([]string(nil), desired.Preview.BuildSecrets...)
 	}
 	return append([]string(nil), desired.BuildSecrets...)
+}
+
+func previewBranchIncludes(desired *Worker) []string {
+	if desired.Preview.BranchIncludes != nil {
+		return append([]string(nil), desired.Preview.BranchIncludes...)
+	}
+	return []string{"*"}
+}
+
+func previewBranchExcludes(desired *Worker) []string {
+	if desired.Preview.BranchExcludes != nil {
+		return append([]string(nil), desired.Preview.BranchExcludes...)
+	}
+	return []string{desired.ProductionBranch}
+}
+
+func branchAllowed(branch string, includes, excludes []string) bool {
+	if branch == "" {
+		return true
+	}
+	matchesAny := func(patterns []string) bool {
+		return slices.ContainsFunc(patterns, func(pattern string) bool {
+			return branchMatches(pattern, branch)
+		})
+	}
+	if len(includes) > 0 && !matchesAny(includes) {
+		return false
+	}
+	return !matchesAny(excludes)
+}
+
+func branchMatches(pattern, branch string) bool {
+	return pattern == "*" || pattern == branch
 }
 
 func cloneStringMap(in map[string]string) map[string]string {
