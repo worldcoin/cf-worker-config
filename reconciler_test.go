@@ -174,6 +174,115 @@ func TestApplyUpdatesExistingTriggersWhenProductionBranchChanges(t *testing.T) {
 	}
 }
 
+func TestApplyCreatesPreviewTriggerWithCustomBranchFilters(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:        "prod",
+			RepoConnectionUUID: "repo-existing",
+			BuildTokenUUID:     "token-1",
+			BuildCommand:       "npm run build:cf",
+			DeployCommand:      "npm run deploy:cf:prod",
+			RootDirectory:      ".",
+			BranchIncludes:     []string{"prod"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-prod",
+		Repo:             "worldcoin/tfh-website",
+		BuildTokenUUID:   "token-1",
+		ProductionBranch: "prod",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:prod",
+		Preview: Preview{
+			Enabled:        true,
+			Command:        "npm run deploy:cf:preview",
+			BranchIncludes: []string{"promote-*-to-prod"},
+			BranchExcludes: []string{"prod"},
+		},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	if len(client.triggers) != 2 {
+		t.Fatalf("trigger count = %d, want 2", len(client.triggers))
+	}
+	preview := client.triggers[1]
+	if got := preview.BranchIncludes; !equalStringSets(got, []string{"promote-*-to-prod"}) {
+		t.Fatalf("preview BranchIncludes = %v, want [promote-*-to-prod]", got)
+	}
+	if got := preview.BranchExcludes; !equalStringSets(got, []string{"prod"}) {
+		t.Fatalf("preview BranchExcludes = %v, want [prod]", got)
+	}
+}
+
+func TestApplyUpdatesExistingPreviewTriggerWithCustomBranchFilters(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy production",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:prod",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"prod"},
+		},
+		{
+			TriggerUUID:    "preview",
+			TriggerName:    "Deploy preview branches",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:preview",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"prod"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-prod",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "prod",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:prod",
+		Preview: Preview{
+			Enabled:        true,
+			Command:        "npm run deploy:cf:preview",
+			BranchIncludes: []string{"promote-*-to-prod"},
+			BranchExcludes: []string{"prod"},
+		},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	if got := client.triggers[1].BranchIncludes; !equalStringSets(got, []string{"promote-*-to-prod"}) {
+		t.Fatalf("preview BranchIncludes = %v, want [promote-*-to-prod]", got)
+	}
+	if got := client.triggers[1].BranchExcludes; !equalStringSets(got, []string{"prod"}) {
+		t.Fatalf("preview BranchExcludes = %v, want [prod]", got)
+	}
+}
+
 func TestApplyWithOptionsTriggersBuildForProductionBranch(t *testing.T) {
 	ctx := context.Background()
 
@@ -301,6 +410,63 @@ func TestApplyWithOptionsTriggersBuildForPreviewBranch(t *testing.T) {
 	}
 	if got.Params.CommitHash != "def456" {
 		t.Fatalf("trigger commit = %q, want def456", got.Params.CommitHash)
+	}
+}
+
+func TestApplyWithOptionsSkipsPreviewBuildWhenBranchDoesNotMatchFilters(t *testing.T) {
+	ctx := context.Background()
+
+	client := newFakeClient()
+	client.triggers = []Trigger{
+		{
+			TriggerUUID:    "prod",
+			TriggerName:    "Deploy default branch",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:dev",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"main"},
+		},
+		{
+			TriggerUUID:    "preview",
+			TriggerName:    "Deploy preview branches",
+			BuildCommand:   "npm run build:cf",
+			DeployCommand:  "npm run deploy:cf:preview",
+			RootDirectory:  ".",
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"main", "prod", "promote-*-to-prod"},
+		},
+	}
+
+	desired := &Worker{
+		WorkerName:       "tfh-website-dev",
+		Repo:             "worldcoin/tfh-website",
+		ProductionBranch: "main",
+		RootDirectory:    ".",
+		BuildCommand:     "npm run build:cf",
+		DeployCommand:    "npm run deploy:cf:dev",
+		Preview: Preview{
+			Enabled:        true,
+			Command:        "npm run deploy:cf:preview",
+			BranchIncludes: []string{"*"},
+			BranchExcludes: []string{"main", "prod", "promote-*-to-prod"},
+		},
+	}
+
+	rec := New(client)
+	plan, err := rec.Plan(ctx, desired)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if err := rec.ApplyWithOptions(ctx, desired, plan, ApplyOptions{
+		TriggerBuild:    true,
+		BuildBranch:     "promote-main-to-prod",
+		BuildCommitHash: "def456",
+	}); err != nil {
+		t.Fatalf("ApplyWithOptions() error = %v", err)
+	}
+
+	if len(client.triggeredBuilds) != 0 {
+		t.Fatalf("triggered builds = %d, want 0", len(client.triggeredBuilds))
 	}
 }
 
@@ -842,6 +1008,58 @@ func TestBuildEnvForPreview(t *testing.T) {
 	}
 }
 
+func TestBranchAllowed(t *testing.T) {
+	tests := []struct {
+		name     string
+		branch   string
+		includes []string
+		excludes []string
+		want     bool
+	}{
+		{
+			name:     "included by wildcard",
+			branch:   "feature/foo",
+			includes: []string{"*"},
+			want:     true,
+		},
+		{
+			name:     "excluded by exact branch",
+			branch:   "prod",
+			includes: []string{"*"},
+			excludes: []string{"prod"},
+			want:     false,
+		},
+		{
+			name:     "excluded by wildcard pattern",
+			branch:   "promote-main-to-prod",
+			includes: []string{"*"},
+			excludes: []string{"promote-*-to-prod"},
+			want:     false,
+		},
+		{
+			name:     "included by wildcard pattern",
+			branch:   "promote-main-to-prod",
+			includes: []string{"promote-*-to-prod"},
+			excludes: []string{"prod"},
+			want:     true,
+		},
+		{
+			name:     "not included",
+			branch:   "feature/foo",
+			includes: []string{"promote-*-to-prod"},
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := branchAllowed(tt.branch, tt.includes, tt.excludes); got != tt.want {
+				t.Fatalf("branchAllowed(%q, %v, %v) = %v, want %v", tt.branch, tt.includes, tt.excludes, got, tt.want)
+			}
+		})
+	}
+}
+
 type fakeClient struct {
 	workerTag                 string
 	triggers                  []Trigger
@@ -878,6 +1096,7 @@ func (f *fakeClient) ListTriggers(context.Context, string) ([]Trigger, error) {
 func (f *fakeClient) CreateTrigger(_ context.Context, params CreateTriggerParams) (*Trigger, error) {
 	trigger := Trigger{
 		TriggerUUID:         "trigger-1",
+		TriggerName:         params.TriggerName,
 		RepoConnectionUUID:  params.RepoConnectionUUID,
 		BuildTokenUUID:      params.BuildTokenUUID,
 		BuildCommand:        params.BuildCommand,

@@ -64,6 +64,12 @@ func TestLoad(t *testing.T) {
 				if !worker.Preview.Enabled {
 					t.Fatalf("Preview.Enabled = false, want true")
 				}
+				if !equalStringSets(worker.Preview.BranchIncludes, []string{"*"}) {
+					t.Fatalf("Preview.BranchIncludes = %v, want [*]", worker.Preview.BranchIncludes)
+				}
+				if !equalStringSets(worker.Preview.BranchExcludes, []string{"prod", "promote-*-to-prod"}) {
+					t.Fatalf("Preview.BranchExcludes = %v, want [prod promote-*-to-prod]", worker.Preview.BranchExcludes)
+				}
 				if worker.Preview.BuildVars["NEXT_PUBLIC_APP_ENV"] != "preview" {
 					t.Fatalf("preview NEXT_PUBLIC_APP_ENV = %q, want preview", worker.Preview.BuildVars["NEXT_PUBLIC_APP_ENV"])
 				}
@@ -101,6 +107,11 @@ func TestLoad(t *testing.T) {
 			name:    "missing preview command",
 			fixture: "missing-preview-command.json",
 			wantErr: `worker "tfh-website-dev": preview.command is required when preview.enabled=true`,
+		},
+		{
+			name:    "empty preview branch includes",
+			fixture: "empty-preview-branch-includes.json",
+			wantErr: `worker "tfh-website-dev": preview.branch_includes must not be empty when set`,
 		},
 		{
 			name:    "unknown field",

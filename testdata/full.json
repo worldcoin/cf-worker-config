@@ -25,6 +25,13 @@
       "preview": {
         "enabled": true,
         "command": "npm run deploy:cf:preview",
+        "branch_includes": [
+          "*"
+        ],
+        "branch_excludes": [
+          "prod",
+          "promote-*-to-prod"
+        ],
         "build_vars": {
           "NEXT_PUBLIC_APP_ENV": "preview"
         },
