@@ -1189,18 +1189,19 @@ func (f *fakeClient) ListRuntimeSecrets(context.Context, string) ([]string, erro
 	return append([]string(nil), f.runtimeSecrets...), nil
 }
 
-func (f *fakeClient) SetRuntimeSecret(_ context.Context, _ string, name, _ string) error {
-	f.runtimeSecretSets = append(f.runtimeSecretSets, name)
-	if !slices.Contains(f.runtimeSecrets, name) {
-		f.runtimeSecrets = append(f.runtimeSecrets, name)
+func (f *fakeClient) PatchLatestVersionSecrets(_ context.Context, _ string, secrets map[string]SecretMutation) error {
+	for name, val := range secrets {
+		if val == nil {
+			f.runtimeSecretDeletes = append(f.runtimeSecretDeletes, name)
+			f.runtimeSecrets = slices.DeleteFunc(f.runtimeSecrets, func(secret string) bool {
+				return secret == name
+			})
+			continue
+		}
+		f.runtimeSecretSets = append(f.runtimeSecretSets, name)
+		if !slices.Contains(f.runtimeSecrets, name) {
+			f.runtimeSecrets = append(f.runtimeSecrets, name)
+		}
 	}
-	return nil
-}
-
-func (f *fakeClient) DeleteRuntimeSecret(_ context.Context, _ string, name string) error {
-	f.runtimeSecretDeletes = append(f.runtimeSecretDeletes, name)
-	f.runtimeSecrets = slices.DeleteFunc(f.runtimeSecrets, func(secret string) bool {
-		return secret == name
-	})
 	return nil
 }

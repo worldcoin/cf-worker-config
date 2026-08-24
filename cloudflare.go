@@ -22,6 +22,7 @@ const (
 
 	// Cloudflare API error codes.
 	cfErrWorkerNotDeployed = 10007 // Worker exists but has no deployments
+	cfErrNoWorkerVersions  = 10222 // Worker exists but no versions uploaded yet
 )
 
 // Client wraps the Cloudflare and GitHub HTTP APIs used by cf-worker-config.
@@ -327,25 +328,88 @@ func (c *Client) ListRuntimeSecrets(ctx context.Context, workerName string) ([]s
 	return names, nil
 }
 
-// SetRuntimeSecret sets a single runtime secret on a worker.
-func (c *Client) SetRuntimeSecret(ctx context.Context, workerName, name, value string) error {
-	apiURL := c.cfURL("workers", "scripts", workerName, "secrets")
-	body := struct {
-		Name string `json:"name"`
-		Text string `json:"text"`
-		Type string `json:"type"`
-	}{
-		Name: name,
-		Text: value,
-		Type: "secret_text",
+// SecretMutation is the value type in a PatchLatestVersionSecrets map:
+// a non-nil pointer is a create/update, nil is a delete.
+type SecretMutation = *string
+
+// SecretValue is a helper to build a create/update mutation.
+func SecretValue(v string) SecretMutation { return &v }
+
+// PatchLatestVersionSecrets applies a batch of runtime secret create/update/delete
+// operations to the worker's latest uploaded version. Uses the versioned merge-patch
+// endpoint so it works even when the latest version is not deployed (which is the
+// default state when Workers Builds uploads via `wrangler versions upload` without
+// promoting). Whole batch becomes one new worker version rather than N.
+//
+// Values: pointer -> create/update; nil -> delete. Empty map is a no-op.
+func (c *Client) PatchLatestVersionSecrets(ctx context.Context, workerName string, secrets map[string]SecretMutation) error {
+	if len(secrets) == 0 {
+		return nil
 	}
-	return c.doJSON(ctx, "PUT", apiURL, body, nil)
+
+	type secretText struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	env := make(map[string]any, len(secrets))
+	for name, val := range secrets {
+		if val == nil {
+			env[name] = nil
+			continue
+		}
+		env[name] = secretText{Type: "secret_text", Text: *val}
+	}
+
+	body := struct {
+		Env map[string]any `json:"env"`
+	}{Env: env}
+
+	apiURL := c.cfURL("workers", "scripts", workerName, "versions", "latest")
+	return c.doMergePatch(ctx, apiURL, body)
 }
 
-// DeleteRuntimeSecret deletes a single runtime secret from a worker.
-func (c *Client) DeleteRuntimeSecret(ctx context.Context, workerName, name string) error {
-	apiURL := c.cfURL("workers", "scripts", workerName, "secrets", name)
-	return c.doJSON(ctx, "DELETE", apiURL, nil, nil)
+// doMergePatch is a variant of doJSON for endpoints that require RFC 7396
+// merge-patch semantics (null == delete). Currently used only for the versioned
+// secrets endpoint.
+func (c *Client) doMergePatch(ctx context.Context, apiURL string, body any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "PATCH", apiURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", "cf-worker-config")
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response body: %w", err)
+	}
+
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		var envelope cfEnvelope
+		if err := json.Unmarshal(respBody, &envelope); err == nil && len(envelope.Errors) > 0 {
+			return &apiError{StatusCode: resp.StatusCode, Errors: envelope.Errors}
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var envelope cfEnvelope
+	if err := json.Unmarshal(respBody, &envelope); err == nil && envelope.Success != nil && !*envelope.Success {
+		return &apiError{StatusCode: resp.StatusCode, Errors: envelope.Errors}
+	}
+
+	return nil
 }
 
 // --- URL construction ---
