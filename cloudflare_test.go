@@ -186,7 +186,7 @@ func TestPatchLatestVersionSecretsBatchesCreateUpdateDelete(t *testing.T) {
 			if req.Method != http.MethodPatch {
 				t.Fatalf("method = %s, want PATCH", req.Method)
 			}
-			wantPath := "/client/v4/accounts/account-id/workers/scripts/tfh-website-dev/versions/latest"
+			wantPath := "/client/v4/accounts/account-id/workers/workers/tfh-website-dev/versions/latest"
 			if req.URL.EscapedPath() != wantPath {
 				t.Fatalf("path = %q, want %q", req.URL.EscapedPath(), wantPath)
 			}
