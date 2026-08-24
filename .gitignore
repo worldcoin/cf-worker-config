@@ -1,2 +1,6 @@
 cf-worker-config
 cf-worker-config.json
+
+# IntelliJ / GoLand
+.idea/
+*.iml

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -178,23 +179,67 @@ func TestListRuntimeSecretsReturnsOtherCloudflareErrors(t *testing.T) {
 	}
 }
 
-func TestDeleteRuntimeSecretDeletesSecretByName(t *testing.T) {
+func TestPatchLatestVersionSecretsBatchesCreateUpdateDelete(t *testing.T) {
 	client := NewClient("token", "account-id")
 	client.http = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Method != http.MethodDelete {
-				t.Fatalf("method = %s, want DELETE", req.Method)
+			if req.Method != http.MethodPatch {
+				t.Fatalf("method = %s, want PATCH", req.Method)
 			}
-			wantPath := "/client/v4/accounts/account-id/workers/scripts/tfh-website-dev/secrets/secret%2Fname"
+			wantPath := "/client/v4/accounts/account-id/workers/scripts/tfh-website-dev/versions/latest"
 			if req.URL.EscapedPath() != wantPath {
 				t.Fatalf("path = %q, want %q", req.URL.EscapedPath(), wantPath)
 			}
-			return jsonResponse(http.StatusOK, `{"success": true}`), nil
+			if got := req.Header.Get("Content-Type"); got != "application/merge-patch+json" {
+				t.Fatalf("Content-Type = %q, want application/merge-patch+json", got)
+			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("reading body: %v", err)
+			}
+			var got struct {
+				Env map[string]json.RawMessage `json:"env"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if s := string(got.Env["OLD_SECRET"]); s != "null" {
+				t.Fatalf(`env["OLD_SECRET"] = %s, want null`, s)
+			}
+			var newVal struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(got.Env["NEW_SECRET"], &newVal); err != nil {
+				t.Fatalf(`env["NEW_SECRET"] shape: %v`, err)
+			}
+			if newVal.Type != "secret_text" || newVal.Text != "new-value" {
+				t.Fatalf(`env["NEW_SECRET"] = %+v, want {secret_text, new-value}`, newVal)
+			}
+			return jsonResponse(http.StatusOK, `{"success": true, "result": {"id": "v-123"}}`), nil
 		}),
 	}
 
-	if err := client.DeleteRuntimeSecret(context.Background(), "tfh-website-dev", "secret/name"); err != nil {
-		t.Fatalf("DeleteRuntimeSecret() error = %v, want nil", err)
+	err := client.PatchLatestVersionSecrets(context.Background(), "tfh-website-dev", map[string]SecretMutation{
+		"NEW_SECRET": SecretValue("new-value"),
+		"OLD_SECRET": nil,
+	})
+	if err != nil {
+		t.Fatalf("PatchLatestVersionSecrets() error = %v, want nil", err)
+	}
+}
+
+func TestPatchLatestVersionSecretsEmptyMapIsNoop(t *testing.T) {
+	client := NewClient("token", "account-id")
+	client.http = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			t.Fatalf("no HTTP request expected for empty mutations, got %s %s", req.Method, req.URL.Path)
+			return nil, nil
+		}),
+	}
+
+	if err := client.PatchLatestVersionSecrets(context.Background(), "tfh-website-dev", nil); err != nil {
+		t.Fatalf("PatchLatestVersionSecrets(nil) error = %v, want nil", err)
 	}
 }
 

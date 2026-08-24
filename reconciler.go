@@ -69,8 +69,7 @@ type APIClient interface {
 	CreateRepoConnection(context.Context, RepoConnection) (*RepoConnection, error)
 	LookupGitHubRepo(context.Context, string, string) (*GitHubRepoInfo, error)
 	ListRuntimeSecrets(context.Context, string) ([]string, error)
-	SetRuntimeSecret(context.Context, string, string, string) error
-	DeleteRuntimeSecret(context.Context, string, string) error
+	PatchLatestVersionSecrets(context.Context, string, map[string]SecretMutation) error
 }
 
 // Reconciler compares desired and current state.
@@ -668,6 +667,13 @@ func (r *Reconciler) syncRuntimeSecrets(ctx context.Context, desired *Worker, op
 		desiredSecretSet[key] = struct{}{}
 	}
 
+	// Collect all create/update/delete ops into a single batch so the entire
+	// sync is one new worker version (not N). Sending them separately still
+	// works via the same versioned endpoint, but each call would allocate a
+	// fresh version.
+	mutations := make(map[string]SecretMutation)
+	logs := make([]string, 0, len(desired.RuntimeSecrets))
+
 	fmt.Printf("Syncing runtime secrets to worker %s when values are available...\n", desired.WorkerName)
 	for _, key := range desired.RuntimeSecrets {
 		_, exists := currentSecretSet[key]
@@ -683,21 +689,29 @@ func (r *Reconciler) syncRuntimeSecrets(ctx context.Context, desired *Worker, op
 			}
 			return fmt.Errorf("env var %s is empty — cannot set runtime secret", key)
 		}
-		if err := r.client.SetRuntimeSecret(ctx, desired.WorkerName, key, value); err != nil {
-			return fmt.Errorf("setting %s: %w", key, err)
-		}
-		fmt.Printf("  ✓ %s\n", key)
+		mutations[key] = SecretValue(value)
+		logs = append(logs, fmt.Sprintf("  ✓ %s", key))
 	}
 	if opts.prune {
 		for _, key := range currentSecrets {
 			if _, desired := desiredSecretSet[key]; desired {
 				continue
 			}
-			if err := r.client.DeleteRuntimeSecret(ctx, desired.WorkerName, key); err != nil {
-				return fmt.Errorf("deleting %s: %w", key, err)
-			}
-			fmt.Printf("  - deleted %s\n", key)
+			mutations[key] = nil
+			logs = append(logs, fmt.Sprintf("  - deleted %s", key))
 		}
+	}
+
+	if len(mutations) == 0 {
+		fmt.Println("✓ Done (no changes)")
+		return nil
+	}
+
+	if err := r.client.PatchLatestVersionSecrets(ctx, desired.WorkerName, mutations); err != nil {
+		return fmt.Errorf("patching runtime secrets: %w", err)
+	}
+	for _, line := range logs {
+		fmt.Println(line)
 	}
 	fmt.Println("✓ Done")
 	return nil
