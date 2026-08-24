@@ -364,7 +364,8 @@ func (c *Client) PatchLatestVersionSecrets(ctx context.Context, workerName strin
 		Env map[string]any `json:"env"`
 	}{Env: env}
 
-	apiURL := c.cfURL("workers", "scripts", workerName, "versions", "latest")
+	// Versioned secrets PATCH is routed under `workers/workers/` in CF, not `workers/scripts/`.
+	apiURL := c.cfURL("workers", "workers", workerName, "versions", "latest")
 	return c.doMergePatch(ctx, apiURL, body)
 }
 
