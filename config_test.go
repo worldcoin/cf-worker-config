@@ -1,10 +1,44 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadRuntimeVars(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, tc := range []struct{ name, extra, wantErr string }{
+		{"valid", `"runtime_vars":["API_URL"],"build_vars":{"API_URL":""}`, ""},
+		{"missing", `"runtime_vars":["API_URL"]`, "must exist in build_vars"},
+		{"duplicate", `"runtime_vars":["API_URL","API_URL"],"build_vars":{"API_URL":"url"}`, "duplicate"},
+		{"empty", `"runtime_vars":[" "]`, "empty"},
+		{"runtime secret", `"runtime_vars":["API_URL"],"build_vars":{"API_URL":"url"},"runtime_secrets":["API_URL"]`, "also declared as a secret"},
+		{"build secret", `"runtime_vars":["API_URL"],"build_vars":{"API_URL":"url"},"build_secrets":["API_URL"]`, "also declared as a secret"},
+		{"preview secret", `"runtime_vars":["API_URL"],"build_vars":{"API_URL":"url"},"preview":{"build_secrets":["API_URL"]}`, "also declared as a secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := `{"account_id":"account","repo":"owner/repo","workers":{"test":{"production_branch":"main","build_command":"build","deploy_command":"deploy",` + tc.extra + `}}}`
+			if err := os.WriteFile("config.json", []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load("config.json")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Workers["test"].RuntimeVars; len(got) != 1 || got[0] != "API_URL" {
+				t.Fatalf("runtime vars = %v", got)
+			}
+		})
+	}
+}
 
 func TestLoad(t *testing.T) {
 	tests := []struct {

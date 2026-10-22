@@ -6,10 +6,103 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestSetRuntimeVarsPreservesOtherBindings(t *testing.T) {
+	client := NewClient("token", "account")
+	requests := 0
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.URL.Path != "/client/v4/accounts/account/workers/scripts/test/settings" {
+			t.Fatalf("path = %s", req.URL.Path)
+		}
+		if req.Header.Get("Authorization") != "Bearer token" {
+			t.Fatal("missing authorization")
+		}
+		if req.Method == "GET" {
+			return jsonResponse(200, `{"success":true,"result":{"annotations":{"workers/message":"release"},"bindings":[{"name":"API_URL","type":"plain_text","text":"old"},{"name":"UNMANAGED","type":"plain_text","text":"keep"},{"name":"SECRET","type":"secret_text"},{"name":"CACHE","type":"r2_bucket","bucket_name":"bucket"},{"name":"QUEUE","type":"durable_object_namespace","class_name":"Queue"},{"name":"ASSETS","type":"assets"},{"name":"FUTURE","type":"new_binding_type"}]}}`), nil
+		}
+		if req.Method != "PATCH" {
+			t.Fatalf("method = %s", req.Method)
+		}
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		defer req.MultipartForm.RemoveAll()
+		var settings struct {
+			Bindings    []map[string]string `json:"bindings"`
+			Annotations map[string]string   `json:"annotations"`
+		}
+		if err := json.Unmarshal([]byte(req.FormValue("settings")), &settings); err != nil {
+			t.Fatal(err)
+		}
+		if settings.Annotations["workers/message"] != "release" {
+			t.Fatal("annotations lost")
+		}
+		if len(settings.Bindings) != 8 {
+			t.Fatalf("bindings = %+v", settings.Bindings)
+		}
+		for _, binding := range settings.Bindings {
+			name := binding["name"]
+			want := map[string]string{"name": name, "type": "inherit"}
+			if name == "API_URL" {
+				want = map[string]string{"name": name, "type": "plain_text", "text": "new"}
+			}
+			if name == "EMPTY" {
+				want = map[string]string{"name": name, "type": "plain_text", "text": ""}
+			}
+			if !maps.Equal(binding, want) {
+				t.Fatalf("binding = %v, want %v", binding, want)
+			}
+		}
+		return jsonResponse(200, `{"success":true}`), nil
+	})
+	if err := client.SetRuntimeVars(context.Background(), "test", map[string]string{"API_URL": "new", "EMPTY": ""}); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
+func TestSetRuntimeVarsNoopAndErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, wantErr string
+		status                  int
+		vars                    map[string]string
+		requests                int
+	}{
+		{"empty", "", "", 200, nil, 0},
+		{"unchanged", `{"result":{"bindings":[{"name":"VAR","type":"plain_text","text":"value"}]}}`, "", 200, map[string]string{"VAR": "value"}, 1},
+		{"secret collision", `{"result":{"bindings":[{"name":"VAR","type":"secret_text"}]}}`, "conflicts", 200, map[string]string{"VAR": "value"}, 1},
+		{"resource collision", `{"result":{"bindings":[{"name":"VAR","type":"r2_bucket"}]}}`, "conflicts", 200, map[string]string{"VAR": "value"}, 1},
+		{"missing settings", `{"result":null}`, "no runtime settings", 200, map[string]string{"VAR": "value"}, 1},
+		{"permission denied", `{"success":false,"errors":[{"code":10000,"message":"denied"}]}`, "denied", 403, map[string]string{"VAR": "value"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("token", "account")
+			requests := 0
+			client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				if req.Method != "GET" {
+					t.Fatal("unexpected mutation")
+				}
+				return jsonResponse(tc.status, tc.response), nil
+			})
+			err := client.SetRuntimeVars(context.Background(), "test", tc.vars)
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if requests != tc.requests {
+				t.Fatalf("requests = %d, want %d", requests, tc.requests)
+			}
+		})
+	}
+}
 
 func TestClientCFURL(t *testing.T) {
 	client := NewClient("token", "account/id")

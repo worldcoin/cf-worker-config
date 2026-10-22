@@ -13,7 +13,7 @@ import (
 // Action represents a single change to be applied.
 type Action struct {
 	Type     string // "create", "update", "delete", "set"
-	Resource string // "trigger", "build_var", "build_secret", "runtime_secret", "repo_connection"
+	Resource string // "trigger", "build_var", "build_secret", "runtime_var", "runtime_secret", "repo_connection"
 	Name     string
 	Detail   string
 	Trigger  string // "production" or "preview" for trigger-scoped resources
@@ -69,6 +69,8 @@ type APIClient interface {
 	CreateRepoConnection(context.Context, RepoConnection) (*RepoConnection, error)
 	LookupGitHubRepo(context.Context, string, string) (*GitHubRepoInfo, error)
 	ListRuntimeSecrets(context.Context, string) ([]string, error)
+	GetRuntimeSettings(context.Context, string) (*RuntimeSettings, error)
+	SetRuntimeVars(context.Context, string, map[string]string) error
 	PatchLatestVersionSecrets(context.Context, string, map[string]SecretMutation) error
 }
 
@@ -91,6 +93,9 @@ func New(client APIClient) *Reconciler {
 
 // Plan computes the diff between desired config and current CF state.
 func (r *Reconciler) Plan(ctx context.Context, desired *Worker) (*Plan, error) {
+	if err := validateRuntimeVars(desired); err != nil {
+		return nil, err
+	}
 	plan := &Plan{WorkerName: desired.WorkerName}
 
 	// Get worker tag
@@ -121,6 +126,20 @@ func (r *Reconciler) Plan(ctx context.Context, desired *Worker) (*Plan, error) {
 
 	if err := r.planPreviewTrigger(ctx, plan, desired, prodTrigger, previewTrigger); err != nil {
 		return nil, err
+	}
+
+	if len(desired.RuntimeVars) > 0 {
+		settings, err := r.client.GetRuntimeSettings(ctx, desired.WorkerName)
+		if err != nil {
+			return nil, fmt.Errorf("reading runtime settings: %w", err)
+		}
+		changes, err := runtimeVarChanges(settings, desiredRuntimeVars(desired))
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range slices.Sorted(maps.Keys(changes)) {
+			plan.Actions = append(plan.Actions, Action{Type: "set", Resource: "runtime_var", Name: name, Detail: "sync from build_vars"})
+		}
 	}
 
 	// Check runtime secrets
@@ -214,6 +233,9 @@ func (r *Reconciler) planRepoConnectionIfNeeded(plan *Plan, desired *Worker) {
 
 // ApplyWithOptions executes a plan against the CF API.
 func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan *Plan, opts ApplyOptions) error {
+	if err := validateRuntimeVars(desired); err != nil {
+		return err
+	}
 	if !plan.HasChanges() {
 		fmt.Println("No trigger drift detected. Syncing declared build env/secrets when values are available.")
 	}
@@ -255,8 +277,8 @@ func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan
 				return err
 			}
 
-		case action.Resource == "build_var" || action.Resource == "build_secret" || action.Resource == "repo_connection":
-			// Build env and repo connection are reconciled in batch after trigger changes.
+		case action.Resource == "build_var" || action.Resource == "build_secret" || action.Resource == "runtime_var" || action.Resource == "repo_connection":
+			// Environment settings and repo connection are reconciled in batch after trigger changes.
 			continue
 
 		case action.Resource == "trigger" && action.Type == "delete" && action.Name == "preview":
@@ -272,6 +294,11 @@ func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan
 	if err := r.syncBuildEnvForDesiredTriggers(ctx, desired, plan.WorkerTag, false); err != nil {
 		return err
 	}
+	if len(desired.RuntimeVars) > 0 {
+		if err := r.client.SetRuntimeVars(ctx, desired.WorkerName, desiredRuntimeVars(desired)); err != nil {
+			return fmt.Errorf("syncing runtime vars: %w", err)
+		}
+	}
 	if opts.TriggerBuild {
 		if err := r.triggerBuild(ctx, desired, plan.WorkerTag, opts); err != nil {
 			return err
@@ -279,6 +306,14 @@ func (r *Reconciler) ApplyWithOptions(ctx context.Context, desired *Worker, plan
 	}
 
 	return nil
+}
+
+func desiredRuntimeVars(desired *Worker) map[string]string {
+	vars := make(map[string]string, len(desired.RuntimeVars))
+	for _, name := range desired.RuntimeVars {
+		vars[name] = desired.BuildVars[name]
+	}
+	return vars
 }
 
 func (r *Reconciler) triggerBuild(ctx context.Context, desired *Worker, workerTag string, opts ApplyOptions) error {

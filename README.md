@@ -9,6 +9,7 @@ Manages the gap between Terraform (infra) and wrangler.jsonc (runtime):
 - **Repo connection** — connects a GitHub repo to a Worker
 - **Build triggers** — production branch, build/deploy commands, preview branches
 - **Build variables and secrets** — env vars available during `next build`
+- **Runtime variables** — selected non-secret build variables synchronized to Worker bindings
 - **Runtime secrets** — env vars available to the Worker at request time
 - **Post-apply builds** — queues a Workers Build after reconciliation
 - **Drift detection** — `plan --fail-on-drift` for scheduled CI checks
@@ -43,8 +44,10 @@ Create a `cf-worker-config.json` in your repo. This is strict JSON, not JSONC:
         "NODE_VERSION": "22",
         "NEXT_PUBLIC_APP_ENV": "production",
         "NEXT_PUBLIC_METRICS_API_URL": "https://metrics.worldcoin.org",
-        "NEXT_PUBLIC_GTM": "GTM-NC5VGCVL"
+        "NEXT_PUBLIC_GTM": "GTM-NC5VGCVL",
+        "API_URL": "https://api.example.com"
       },
+      "runtime_vars": ["API_URL"],
       "build_secrets": [
         "NEXT_SERVER_HUBSPOT_API_TOKEN",
         "NEXT_SERVER_ASHBY_API_KEY",
@@ -65,6 +68,21 @@ Create a `cf-worker-config.json` in your repo. This is strict JSON, not JSONC:
 ```
 
 Secret **values** are read from environment variables at apply time, not from the config file.
+
+`runtime_vars` lists names whose values are taken from the worker's `build_vars`.
+`plan` detects missing or changed runtime values; `apply` synchronizes them before
+queueing a build. Names must exist in `build_vars` and must not also be declared
+as secrets. Preview build overrides do not change the live Worker's runtime values.
+
+Runtime synchronization patches the Worker's settings, preserving all other
+bindings and version annotations. Existing secrets and resource bindings cannot
+be overwritten with plaintext variables. An unchanged configuration does not
+create another Worker version. Removing a name from `runtime_vars` stops managing
+it; it does not delete the remote binding.
+
+Deploy the Worker once before enabling `runtime_vars`. Set `"keep_vars": true`
+in its Wrangler config so subsequent deployments preserve variables managed here.
+Do not duplicate these values in Wrangler `vars`.
 
 `repo` and `repo_connection_uuid` are top-level because a config file normally
 lives in one application repository and the repo connection is shared by all
@@ -134,7 +152,7 @@ CLOUDFLARE_ACCOUNT_ID=ae97c44fcd31b9289a7455120d2698b2 \
 cf-worker-config plan --worker tfh-website-dev --fail-on-drift
 ```
 
-`apply` always syncs declared build vars and refreshes declared build secrets
+`apply` always syncs declared build and runtime vars and refreshes declared build secrets
 when their values are present in the environment. Runtime secrets are not
 created or refreshed during `apply`; use `sync-runtime-secrets` when
 intentionally creating or rotating runtime secrets. Pass `--prune` to

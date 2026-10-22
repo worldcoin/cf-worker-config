@@ -1066,6 +1066,8 @@ type fakeClient struct {
 	buildVars                 map[string]map[string]BuildEnvVar
 	buildTokens               []BuildToken
 	runtimeSecrets            []string
+	runtimeSettings           RuntimeSettings
+	runtimeVarSets            map[string]string
 	runtimeSecretSets         []string
 	runtimeSecretDeletes      []string
 	triggeredBuilds           []triggeredBuild
@@ -1187,6 +1189,71 @@ func (f *fakeClient) LookupGitHubRepo(context.Context, string, string) (*GitHubR
 
 func (f *fakeClient) ListRuntimeSecrets(context.Context, string) ([]string, error) {
 	return append([]string(nil), f.runtimeSecrets...), nil
+}
+
+func (f *fakeClient) GetRuntimeSettings(context.Context, string) (*RuntimeSettings, error) {
+	return &f.runtimeSettings, nil
+}
+
+func (f *fakeClient) SetRuntimeVars(_ context.Context, _ string, vars map[string]string) error {
+	f.runtimeVarSets = maps.Clone(vars)
+	f.runtimeSettings.Bindings = nil
+	for name, value := range vars {
+		f.runtimeSettings.Bindings = append(f.runtimeSettings.Bindings, RuntimeBinding{Name: name, Type: "plain_text", Text: value})
+	}
+	return nil
+}
+
+func TestApplySyncsRuntimeVarsFromBuildVars(t *testing.T) {
+	client := newFakeClient()
+	client.runtimeSettings.Bindings = []RuntimeBinding{{Name: "API_URL", Type: "plain_text", Text: "old"}}
+	desired := &Worker{
+		WorkerName: "test", ProductionBranch: "main", RepoConnectionUUID: "repo", BuildTokenUUID: "token",
+		BuildCommand: "build", DeployCommand: "deploy", RootDirectory: ".",
+		BuildVars:   map[string]string{"API_URL": "new", "EMPTY": "", "BUILD_ONLY": "build"},
+		RuntimeVars: []string{"API_URL", "EMPTY"},
+	}
+	rec := New(client)
+	plan, err := rec.Plan(context.Background(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, action := range plan.Actions {
+		if action.Resource == "runtime_var" {
+			names = append(names, action.Name)
+		}
+	}
+	if !slices.Equal(names, []string{"API_URL", "EMPTY"}) {
+		t.Fatalf("runtime actions = %v", names)
+	}
+	if err := rec.ApplyWithOptions(context.Background(), desired, plan, ApplyOptions{TriggerBuild: true, BuildBranch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(client.runtimeVarSets, map[string]string{"API_URL": "new", "EMPTY": ""}) {
+		t.Fatalf("runtime vars = %v", client.runtimeVarSets)
+	}
+	if len(client.triggeredBuilds) != 1 {
+		t.Fatal("build was not triggered")
+	}
+	plan, err = rec.Plan(context.Background(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.HasChanges() {
+		t.Fatalf("second plan has drift: %+v", plan.Actions)
+	}
+}
+
+func TestPlanRejectsRuntimeBindingCollision(t *testing.T) {
+	client := newFakeClient()
+	client.runtimeSettings.Bindings = []RuntimeBinding{{Name: "API_URL", Type: "secret_text"}}
+	_, err := New(client).Plan(context.Background(), &Worker{
+		WorkerName: "test", ProductionBranch: "main", BuildVars: map[string]string{"API_URL": "value"}, RuntimeVars: []string{"API_URL"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("error = %v", err)
+	}
 }
 
 func (f *fakeClient) PatchLatestVersionSecrets(_ context.Context, _ string, secrets map[string]SecretMutation) error {

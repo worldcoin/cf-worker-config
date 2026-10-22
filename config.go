@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -45,6 +46,7 @@ type Worker struct {
 	Preview             Preview           `json:"preview"`
 	BuildVars           map[string]string `json:"build_vars"`
 	BuildSecrets        []string          `json:"build_secrets"`
+	RuntimeVars         []string          `json:"runtime_vars"`
 	RuntimeSecrets      []string          `json:"runtime_secrets"`
 }
 
@@ -119,10 +121,31 @@ func Load(configPath string) (*Config, error) {
 		if err := validatePreviewBranchFilters(name, w.Preview); err != nil {
 			return nil, err
 		}
+		if err := validateRuntimeVars(&w); err != nil {
+			return nil, err
+		}
 		cfg.Workers[name] = w
 	}
 
 	return &cfg, nil
+}
+
+// RuntimeVars references non-secret BuildVars so values have one source of truth.
+func validateRuntimeVars(w *Worker) error {
+	seen := make(map[string]bool)
+	for _, name := range w.RuntimeVars {
+		if strings.TrimSpace(name) == "" || seen[name] {
+			return fmt.Errorf("worker %q: runtime_vars contains an empty or duplicate name %q", w.WorkerName, name)
+		}
+		seen[name] = true
+		if _, ok := w.BuildVars[name]; !ok {
+			return fmt.Errorf("worker %q: runtime_vars name %q must exist in build_vars", w.WorkerName, name)
+		}
+		if slices.Contains(w.BuildSecrets, name) || slices.Contains(w.RuntimeSecrets, name) || slices.Contains(w.Preview.BuildSecrets, name) {
+			return fmt.Errorf("worker %q: runtime_vars name %q is also declared as a secret", w.WorkerName, name)
+		}
+	}
+	return nil
 }
 
 func applyRepoDefaults(w *Worker, cfg Config) {

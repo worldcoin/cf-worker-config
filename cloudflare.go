@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -299,6 +302,98 @@ func (c *Client) LookupGitHubRepo(ctx context.Context, owner, repo string) (*Git
 	}, nil
 }
 
+// --- Runtime variables ---
+
+// RuntimeBinding contains only the fields needed to compare ordinary variables.
+// Other binding types are inherited by name, never reconstructed from this type.
+type RuntimeBinding struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type RuntimeSettings struct {
+	Bindings    []RuntimeBinding  `json:"bindings"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+func (c *Client) GetRuntimeSettings(ctx context.Context, workerName string) (*RuntimeSettings, error) {
+	var result struct {
+		Result *RuntimeSettings `json:"result"`
+	}
+	if err := c.doJSON(ctx, "GET", c.cfURL("workers", "scripts", workerName, "settings"), nil, &result); err != nil {
+		return nil, err
+	}
+	if result.Result == nil {
+		return nil, fmt.Errorf("worker %q has no runtime settings; deploy it before syncing runtime_vars", workerName)
+	}
+	return result.Result, nil
+}
+
+func runtimeVarChanges(settings *RuntimeSettings, desired map[string]string) (map[string]string, error) {
+	changes := maps.Clone(desired)
+	for _, binding := range settings.Bindings {
+		value, managed := desired[binding.Name]
+		if !managed {
+			continue
+		}
+		if binding.Type != "plain_text" {
+			return nil, fmt.Errorf("runtime var %q conflicts with existing %q binding", binding.Name, binding.Type)
+		}
+		if binding.Text == value {
+			delete(changes, binding.Name)
+		}
+	}
+	return changes, nil
+}
+
+// SetRuntimeVars updates declared plaintext bindings in a single settings patch.
+// Re-read immediately before applying: preserve all other bindings and annotations,
+// reject resource/secret collisions, and avoid a new version when nothing changed.
+func (c *Client) SetRuntimeVars(ctx context.Context, workerName string, vars map[string]string) error {
+	if len(vars) == 0 {
+		return nil
+	}
+	settings, err := c.GetRuntimeSettings(ctx, workerName)
+	if err != nil {
+		return err
+	}
+	changes, err := runtimeVarChanges(settings, vars)
+	if err != nil || len(changes) == 0 {
+		return err
+	}
+	bindings := make([]map[string]string, 0, len(settings.Bindings)+len(changes))
+	for _, binding := range settings.Bindings {
+		if _, changed := changes[binding.Name]; !changed {
+			bindings = append(bindings, map[string]string{"name": binding.Name, "type": "inherit"})
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(changes)) {
+		bindings = append(bindings, map[string]string{"name": name, "type": "plain_text", "text": changes[name]})
+	}
+	data, err := json.Marshal(struct {
+		Bindings    []map[string]string `json:"bindings"`
+		Annotations map[string]string   `json:"annotations,omitempty"`
+	}{bindings, settings.Annotations})
+	if err != nil {
+		return err
+	}
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	if err := form.WriteField("settings", string(data)); err != nil {
+		return err
+	}
+	if err := form.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, "PATCH", c.cfURL("workers", "scripts", workerName, "settings"), &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	return c.doRequest(req, nil)
+}
+
 // --- Runtime secrets ---
 
 type runtimeSecret struct {
@@ -500,11 +595,15 @@ func (c *Client) doJSON(ctx context.Context, method, apiURL string, body any, re
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("User-Agent", "cf-worker-config")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	return c.doRequest(req, result)
+}
+
+func (c *Client) doRequest(req *http.Request, result any) error {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", "cf-worker-config")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
