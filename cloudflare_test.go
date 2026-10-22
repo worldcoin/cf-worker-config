@@ -32,7 +32,11 @@ func TestSetRuntimeVarsPreservesOtherBindings(t *testing.T) {
 		if err := req.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatal(err)
 		}
-		defer req.MultipartForm.RemoveAll()
+		defer func() {
+			if err := req.MultipartForm.RemoveAll(); err != nil {
+				t.Error(err)
+			}
+		}()
 		var settings struct {
 			Bindings    []map[string]string `json:"bindings"`
 			Annotations map[string]string   `json:"annotations"`
